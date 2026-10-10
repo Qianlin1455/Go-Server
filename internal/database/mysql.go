@@ -3,11 +3,15 @@ package database
 import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"log"
+	"os"
 )
 
 func InitDB() (*gorm.DB, error) {
-	dsn := "go_user:123456@tcp(127.0.0.1:3307)/go_db?charset=utf8mb4&parseTime=True&loc=Local"
-
+	dsn := os.Getenv("MYSQL_DSN")
+	if dsn == "" {
+		log.Fatal("MYSQL_DSN 环境变量未设置")
+	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		TranslateError: true,
 	})
