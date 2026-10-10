@@ -12,7 +12,7 @@ INDEX idx_conversations_user_id (user_id),
 
     CONSTRAINT fk_conversations_user
         FOREIGN KEY (user_id)
-        REFERENCES users(id)
+        REFERENCES model.model.Users(id)
         ON DELETE CASCADE
 ```
 

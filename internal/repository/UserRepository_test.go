@@ -1,13 +1,13 @@
 package repository
 
 import (
+	"GoServer/internal/database"
+	"GoServer/internal/model"
 	"context"
 	"errors"
 	"strconv"
 	"testing"
 	"time"
-
-	"GoServer/internal/database"
 
 	"gorm.io/gorm"
 )
@@ -67,7 +67,7 @@ func TestCreateUser(t *testing.T) {
 
 	suffix := testSuffix()
 
-	user := &Users{
+	user := &model.Users{
 		UserName: "test_" + suffix,
 		Email:    "test_" + suffix + "@example.com",
 		Password: "test-hash",
@@ -84,7 +84,7 @@ func TestCreateUser(t *testing.T) {
 	}
 
 	// 2. 重复邮箱
-	duplicateEmail := &Users{
+	duplicateEmail := &model.Users{
 		UserName: "other_" + suffix,
 		Email:    user.Email,
 		Password: "test-hash",
@@ -100,7 +100,7 @@ func TestCreateUser(t *testing.T) {
 	}
 
 	// 3. 重复用户名
-	duplicateName := &Users{
+	duplicateName := &model.Users{
 		UserName: user.UserName,
 		Email:    "other_" + suffix + "@example.com",
 		Password: "test-hash",
@@ -123,7 +123,7 @@ func TestGetUser(t *testing.T) {
 
 	suffix := testSuffix()
 
-	user := &Users{
+	user := &model.Users{
 		UserName: "get_" + suffix,
 		Email:    "get_" + suffix + "@example.com",
 		Password: "test-hash",
@@ -185,19 +185,19 @@ func TestListUser(t *testing.T) {
 
 	suffix := testSuffix()
 
-	userA := &Users{
+	userA := &model.Users{
 		UserName: "listA_" + suffix,
 		Email:    "listA_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
-	userB := &Users{
+	userB := &model.Users{
 		UserName: "listB_" + suffix,
 		Email:    "listB_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
-	for _, user := range []*Users{userA, userB} {
+	for _, user := range []*model.Users{userA, userB} {
 		if err := CreateUser(ctx, tx, user); err != nil {
 			t.Fatal(err)
 		}
@@ -244,7 +244,7 @@ func TestCreateUser_CanceledContext(t *testing.T) {
 
 	suffix := testSuffix()
 
-	user := &Users{
+	user := &model.Users{
 		UserName: "cancel_" + suffix,
 		Email:    "cancel_" + suffix + "@test.com",
 		Password: "test-hash",
@@ -261,7 +261,7 @@ func TestCreateUser_CanceledContext(t *testing.T) {
 
 	// 验证取消后的操作没有创建记录
 	var count int64
-	if err := db.Model(&Users{}).
+	if err := db.Model(&model.Users{}).
 		Where("username = ?", user.UserName).
 		Count(&count).Error; err != nil {
 		t.Fatal(err)
@@ -284,7 +284,7 @@ func TestCreateUser_DeadlineExceeded(t *testing.T) {
 
 	suffix := testSuffix()
 
-	user := &Users{
+	user := &model.Users{
 		UserName: "timeout_" + suffix,
 		Email:    "timeout_" + suffix + "@test.com",
 		Password: "test-hash",
@@ -300,7 +300,7 @@ func TestCreateUser_DeadlineExceeded(t *testing.T) {
 	}
 
 	var count int64
-	if err := db.Model(&Users{}).
+	if err := db.Model(&model.Users{}).
 		Where("username = ?", user.UserName).
 		Count(&count).Error; err != nil {
 		t.Fatal(err)

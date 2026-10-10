@@ -1,25 +1,16 @@
 package repository
 
 import (
+	"GoServer/internal/model"
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	_ "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
-type Users struct {
-	ID        uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	UserName  string    `gorm:"column:username;type:varchar(50);not null;uniqueIndex:uk_users_username"`
-	Email     string    `gorm:"column:email;type:varchar(255);not null;uniqueIndex:uk_users_email"`
-	Password  string    `gorm:"column:password_hash;type:varchar(255);not null"`
-	CreatedAt time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoCreateTime"`
-	UpdatedAt time.Time `gorm:"column:updated_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoUpdateTime"`
-}
-
-func CreateUser(ctx context.Context, db *gorm.DB, u *Users) error {
+func CreateUser(ctx context.Context, db *gorm.DB, u *model.Users) error {
 	result := db.WithContext(ctx).Create(u)
 	if result.Error == nil {
 		return nil
@@ -36,8 +27,8 @@ func CreateUser(ctx context.Context, db *gorm.DB, u *Users) error {
 	return fmt.Errorf("create user failed: %w", ErrStorage)
 }
 
-func GetUserByID(ctx context.Context, db *gorm.DB, id uint64) (*Users, error) {
-	user := Users{}
+func GetUserByID(ctx context.Context, db *gorm.DB, id uint64) (*model.Users, error) {
+	user := model.Users{}
 	result := db.WithContext(ctx).First(&user, id)
 	if result.Error == nil {
 		return &user, nil
@@ -53,8 +44,8 @@ func GetUserByID(ctx context.Context, db *gorm.DB, id uint64) (*Users, error) {
 	return nil, fmt.Errorf("查询失败:%w", ErrStorage)
 }
 
-func GetUserByName(ctx context.Context, db *gorm.DB, name string) (*Users, error) {
-	var user Users
+func GetUserByName(ctx context.Context, db *gorm.DB, name string) (*model.Users, error) {
+	var user model.Users
 	result := db.WithContext(ctx).Where("username = ?", name).First(&user)
 	if result.Error == nil {
 		return &user, nil
@@ -69,8 +60,31 @@ func GetUserByName(ctx context.Context, db *gorm.DB, name string) (*Users, error
 	return nil, ErrStorage
 }
 
-func ListUser(ctx context.Context, db *gorm.DB) ([]Users, error) {
-	users := make([]Users, 0)
+func GetUserByEmail(
+	ctx context.Context,
+	db *gorm.DB,
+	email string,
+) (*model.Users, error) {
+
+	var user model.Users
+
+	err := db.WithContext(ctx).
+		Where("email = ?", email).
+		First(&user).Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+
+		return nil, fmt.Errorf("get user by email: %w", err)
+	}
+
+	return &user, nil
+}
+
+func ListUser(ctx context.Context, db *gorm.DB) ([]model.Users, error) {
+	users := make([]model.Users, 0)
 
 	err := db.WithContext(ctx).Order("id ASC").Find(&users).Error
 	if err == nil {

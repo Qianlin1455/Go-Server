@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"GoServer/internal/model"
 	"context"
 	"errors"
 	"testing"
@@ -16,7 +17,7 @@ func TestCreateConversation_InvalidUser(t *testing.T) {
 
 	var count int64
 
-	err := tx.Model(&Users{}).
+	err := tx.Model(&model.Users{}).
 		Where("id = ?", invalidUserID).
 		Count(&count).Error
 
@@ -28,7 +29,7 @@ func TestCreateConversation_InvalidUser(t *testing.T) {
 		t.Fatal("测试用户 ID 已存在")
 	}
 
-	con := &Conversation{
+	con := &model.Conversation{
 		UserID: invalidUserID,
 		Title:  "Test Conversation",
 	}
@@ -50,13 +51,13 @@ func TestGetConversationByID_Isolation(t *testing.T) {
 
 	suffix := testSuffix()
 
-	userA := &Users{
+	userA := &model.Users{
 		UserName: "userA_" + suffix,
 		Email:    "a_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
-	userB := &Users{
+	userB := &model.Users{
 		UserName: "userB_" + suffix,
 		Email:    "b_" + suffix + "@test.com",
 		Password: "test-hash",
@@ -72,7 +73,7 @@ func TestGetConversationByID_Isolation(t *testing.T) {
 	}
 
 	// 用户 B 创建一条会话
-	con := &Conversation{
+	con := &model.Conversation{
 		UserID: userB.ID,
 		Title:  "Private Conversation",
 	}
@@ -122,19 +123,19 @@ func TestListConversation_Isolation(t *testing.T) {
 
 	suffix := testSuffix()
 
-	userA := &Users{
+	userA := &model.Users{
 		UserName: "listA_" + suffix,
 		Email:    "listA_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
-	userB := &Users{
+	userB := &model.Users{
 		UserName: "listB_" + suffix,
 		Email:    "listB_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
-	for _, user := range []*Users{userA, userB} {
+	for _, user := range []*model.Users{userA, userB} {
 		if err := CreateUser(ctx, tx, user); err != nil {
 			t.Fatal(err)
 		}
@@ -145,7 +146,7 @@ func TestListConversation_Isolation(t *testing.T) {
 		"Go学习",
 		"MySQL学习",
 	} {
-		con := &Conversation{
+		con := &model.Conversation{
 			UserID: userB.ID,
 			Title:  title,
 		}
@@ -203,7 +204,7 @@ func TestConversation_CanceledContext(t *testing.T) {
 	cancel()
 
 	// 1. CreateConversation
-	con := &Conversation{
+	con := &model.Conversation{
 		UserID: 0,
 		Title:  "Canceled Test",
 	}
@@ -250,7 +251,7 @@ func TestConversation_DeadlineExceeded(t *testing.T) {
 	defer cancel()
 
 	// 1. CreateConversation
-	con := &Conversation{
+	con := &model.Conversation{
 		UserID: 0,
 		Title:  "Timeout Test",
 	}
