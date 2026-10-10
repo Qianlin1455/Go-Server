@@ -7,4 +7,5 @@ var (
 	ErrAlreadyExists    = errors.New("resource already exists")
 	ErrInvalidReference = errors.New("invalid reference")
 	ErrStorage          = errors.New("storage failure")
+	ErrUserNotFound     = errors.New("user not found")
 )
