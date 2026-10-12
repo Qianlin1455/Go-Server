@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
 	"gorm.io/gorm"
+	"time"
 )
 
 func CreateConversation(ctx context.Context, db *gorm.DB, con *model.Conversation) error {
@@ -52,4 +52,50 @@ func ListConversation(ctx context.Context, db *gorm.DB, userID uint64) ([]model.
 
 	return nil, fmt.Errorf("查询失败:%w", ErrStorage)
 
+}
+
+func TouchConversation(
+	ctx context.Context,
+	tx *gorm.DB,
+	conversationID uint64,
+) error {
+	result := tx.WithContext(ctx).
+		Model(&model.Conversation{}).
+		Where("id = ?", conversationID).
+		UpdateColumn("updated_at", time.Now())
+
+	if result.Error != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf(
+			"touch conversation: %w",
+			errors.Join(ErrStorage, result.Error),
+		)
+	}
+
+	// MySQL 默认报告实际修改的行数。
+	// RowsAffected == 0 也可能是更新时间与旧值相同。
+	if result.RowsAffected == 0 {
+		var count int64
+		err := tx.WithContext(ctx).
+			Model(&model.Conversation{}).
+			Where("id = ?", conversationID).
+			Count(&count).Error
+
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf(
+				"verify conversation: %w",
+				errors.Join(ErrStorage, err),
+			)
+		}
+		if count == 0 {
+			return ErrNotFound
+		}
+	}
+
+	return nil
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func writeServiceerror(c *gin.Context, err error) {
+func WriteServiceerror(c *gin.Context, err error) {
 	var status int
 	var code, message string
 
@@ -29,6 +29,16 @@ func writeServiceerror(c *gin.Context, err error) {
 		status = http.StatusConflict
 		code = "USER_ALREADY_EXISTS"
 		message = "用户已存在"
+
+	case errors.Is(err, service.ErrConversationForbidden):
+		status = http.StatusForbidden
+		code = "FORBIDDEN"
+		message = "无权访问该会话"
+
+	case errors.Is(err, service.ErrConversationNotFound):
+		status = http.StatusNotFound
+		code = "NOT_FOUND"
+		message = "会话不存在"
 
 	default:
 		//保留内部错误

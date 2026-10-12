@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"GoServer/internal/model"
@@ -13,10 +14,15 @@ import (
 )
 
 var (
-	ErrMessageNotFound = errors.New("message not found")
-
+	ErrMessageNotFound     = errors.New("message not found")
+	ErrInvalidMessageInput = errors.New("invalid message input")
 	// conversation 相关错误复用已有定义
 )
+
+type SendMessageInput struct {
+	ConversationID uint64
+	Content        string
+}
 
 // MessageService 负责消息相关业务逻辑
 type MessageService struct {
@@ -50,6 +56,18 @@ func NewMessageService(
 	return &MessageService{
 		db: db,
 	}
+}
+
+func validateSendMessageInput(input SendMessageInput) error {
+	if input.ConversationID == 0 {
+		return ErrInvalidMessageInput
+	}
+
+	if strings.TrimSpace(input.Content) == "" {
+		return ErrInvalidMessageInput
+	}
+
+	return nil
 }
 
 // CreateMessage 创建消息
@@ -176,4 +194,91 @@ func (s *MessageService) ListMessages(
 	}
 
 	return result, nil
+}
+
+func (s *MessageService) SendMessage(
+	ctx context.Context,
+	userID uint64,
+	input SendMessageInput,
+) (*MessageResult, error) {
+
+	// 1. 参数校验
+	if err := validateSendMessageInput(input); err != nil {
+		return nil, err
+	}
+
+	var message model.Message
+
+	// 2. 开启事务
+	err := s.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+
+			// ① 查询会话归属，并锁定会话行
+			ownerID, err := repository.GetConversationOwnerForUpdate(
+				ctx, tx, input.ConversationID,
+			)
+
+			if err != nil {
+				if errors.Is(err, repository.ErrNotFound) {
+					return ErrConversationNotFound
+				}
+				return fmt.Errorf("lookup owner: %w", err)
+			}
+
+			// 权限校验
+			if ownerID != userID {
+				return ErrConversationForbidden
+			}
+
+			// ② 插入消息
+			message = model.Message{
+				ConversationID: input.ConversationID,
+				Role:           "user",
+				Content:        input.Content,
+			}
+
+			if err := repository.CreateMessage(
+				ctx, tx, &message,
+			); err != nil {
+				return fmt.Errorf("create message: %w", err)
+			}
+			fmt.Printf(
+				"After CreateMessage: ID=%d, CreatedAt=%v\n",
+				message.ID,
+				message.CreatedAt,
+			)
+
+			// ③ 更新会话时间
+			if err := repository.TouchConversation(
+				ctx, tx, input.ConversationID,
+			); err != nil {
+				if errors.Is(err, repository.ErrNotFound) {
+					return ErrConversationNotFound
+				}
+				return fmt.Errorf("touch conversation: %w", err)
+			}
+
+			// ④ 告诉 GORM 可以提交事务
+			return nil
+		},
+	)
+
+	// 包括执行失败和提交失败
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf(
+		"Before Return: CreatedAt=%v\n",
+		message.CreatedAt,
+	)
+
+	// 3. 只有事务提交成功才返回结果
+	return &MessageResult{
+		ID:             message.ID,
+		ConversationID: message.ConversationID,
+		Role:           message.Role,
+		Content:        message.Content,
+		CreatedAt:      message.CreatedAt,
+	}, nil
 }

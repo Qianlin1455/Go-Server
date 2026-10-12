@@ -1,0 +1,10 @@
+warning: in the working copy of 'internal/handler/auth_handler.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/handler/conversation_handler.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/handler/health.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/handler/http_error.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/handler/me_handler.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/handler/message_handler.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/repository/ConversationRepository.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/repository/MessageRepository.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/repository/conversation_owner.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/service/message_service.go', LF will be replaced by CRLF the next time Git touches it

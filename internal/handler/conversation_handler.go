@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 
@@ -102,26 +101,7 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrConversationForbidden):
-			c.JSON(http.StatusForbidden, gin.H{
-				"code":    "FORBIDDEN",
-				"message": "无权访问该会话",
-			})
-
-		case errors.Is(err, service.ErrConversationNotFound):
-			c.JSON(http.StatusNotFound, gin.H{
-				"code":    "NOT_FOUND",
-				"message": "会话不存在",
-			})
-
-		default:
-			_ = c.Error(err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"code":    "INTERNAL_ERROR",
-				"message": "服务器内部错误",
-			})
-		}
+		WriteServiceerror(c, err)
 		return
 	}
 
