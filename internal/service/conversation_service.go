@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"GoServer/internal/model"
 	"GoServer/internal/repository"
-
 	"gorm.io/gorm"
 )
 
@@ -64,6 +64,37 @@ func (s *ConversationService) GetConversation(
 	}
 
 	// 4. 只返回允许对外展示的字段
+	return &ConversationResult{
+		ID:    conversation.ID,
+		Title: conversation.Title,
+	}, nil
+}
+
+func (s *ConversationService) CreateConversation(
+	ctx context.Context,
+	userID uint64,
+	title string,
+) (*ConversationResult, error) {
+
+	if userID == 0 {
+		return nil, errors.New("invalid user")
+	}
+
+	conversation := &model.Conversation{
+		UserID: userID,
+		Title:  title,
+	}
+
+	err := repository.CreateConversation(
+		ctx,
+		s.db,
+		conversation,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
 	return &ConversationResult{
 		ID:    conversation.ID,
 		Title: conversation.Title,

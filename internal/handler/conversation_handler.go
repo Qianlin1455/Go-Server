@@ -15,10 +15,57 @@ type ConversationHandler struct {
 	svc *service.ConversationService
 }
 
+type CreateConversationRequest struct {
+	Title string `json:"title" binding:"required"`
+}
+
 func NewConversationHandler(
 	svc *service.ConversationService,
 ) *ConversationHandler {
 	return &ConversationHandler{svc: svc}
+}
+
+func (h *ConversationHandler) CreateConversation(c *gin.Context) {
+	userID, ok := midware.UserIDFromContext(
+		c.Request.Context(),
+	)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    "UNAUTHORIZED",
+			"message": "用户身份无效",
+		})
+		return
+	}
+
+	var req CreateConversationRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "参数错误",
+		})
+		return
+	}
+
+	result, err := h.svc.CreateConversation(
+		c.Request.Context(),
+		userID,
+		req.Title,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code":    "INTERNAL_ERROR",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"code": "SUCCESS",
+		"data": result,
+	})
 }
 
 func (h *ConversationHandler) GetConversation(c *gin.Context) {

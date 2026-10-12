@@ -86,6 +86,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			"code":    "INVALID_ARGUMENT",
 			"message": "注册参数不合法",
 		})
+		return
 	}
 
 	//调用service层

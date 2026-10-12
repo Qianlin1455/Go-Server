@@ -57,6 +57,10 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(
 		conversationService,
 	)
+	messageService := service.NewMessageService(db)
+	messageHandler := handler.NewMessageHandler(
+		messageService,
+	)
 
 	// ========================================
 	// 4. 创建 Gin Engine
@@ -103,11 +107,23 @@ func main() {
 	private.Use(midware.JWTAuth(jwtManager))
 	{
 		private.GET("/users/me", handler.HandleMe)
-
+		private.POST(
+			"/conversations",
+			conversationHandler.CreateConversation,
+		)
 		// 新增
 		private.GET(
 			"/conversations/:id",
 			conversationHandler.GetConversation,
+		)
+		private.POST(
+			"/conversations/:id/messages",
+			messageHandler.CreateMessage,
+		)
+
+		private.GET(
+			"/conversations/:id/messages",
+			messageHandler.ListMessages,
 		)
 	}
 	// ========================================
