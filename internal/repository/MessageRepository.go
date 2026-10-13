@@ -26,17 +26,31 @@ func CreateMessage(ctx context.Context, db *gorm.DB, msg *model.Message) error {
 func ListMessages(
 	ctx context.Context,
 	db *gorm.DB,
+	userID uint64,
 	conversationID uint64,
+	page int,
+	pageSize int,
 ) ([]model.Message, error) {
-
 	msg := make([]model.Message, 0)
+	if page < 1 || pageSize < 1 || pageSize > 100 {
+		return nil, ErrInvalidPagination
+	}
 
-	result := db.WithContext(ctx).
+	maxInt := int(^uint(0) >> 1)
+
+	if page-1 > maxInt/pageSize {
+		return nil, ErrInvalidPagination
+	}
+
+	result := db.WithContext(ctx).Model(&model.Message{}).
+		Select("messages.*").
+		Joins("INNER JOIN conversations ON messages.conversation_id = conversations.id").
 		Where(
-			"conversation_id = ?",
-			conversationID,
+			"conversations.user_id = ? AND messages.conversation_id = ?",
+			userID, conversationID,
 		).
-		Order("id ASC").
+		Order("messages.id ASC").
+		Scopes(Paginate(page, pageSize)).
 		Find(&msg)
 
 	if result.Error == nil {
@@ -49,6 +63,6 @@ func ListMessages(
 
 	return nil, fmt.Errorf(
 		"查询失败:%w",
-		ErrStorage,
+		errors.Join(ErrStorage, result.Error),
 	)
 }

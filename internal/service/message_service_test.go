@@ -272,3 +272,86 @@ func TestSendMessage_Commit(t *testing.T) {
 
 	t.Log("PASS: 消息插入成功，会话时间更新，事务提交")
 }
+
+func TestListMessages_InvalidPagination(t *testing.T) {
+	ctx := context.Background()
+
+	// 当前平台 int 类型的最大值
+	maxInt := int(^uint(0) >> 1)
+
+	// 故意不连接数据库
+	// 非法参数应该在 Service 层直接被拒绝
+	svc := NewMessageService(nil)
+
+	// 表驱动测试
+	tests := []struct {
+		name     string
+		page     int
+		pageSize int
+	}{
+		{
+			name:     "page等于0",
+			page:     0,
+			pageSize: 20,
+		},
+		{
+			name:     "page为负数",
+			page:     -1,
+			pageSize: 20,
+		},
+		{
+			name:     "pageSize等于0",
+			page:     1,
+			pageSize: 0,
+		},
+		{
+			name:     "pageSize为负数",
+			page:     1,
+			pageSize: -1,
+		},
+		{
+			name:     "pageSize超过100",
+			page:     1,
+			pageSize: 101,
+		},
+		{
+			name:     "OFFSET整数溢出",
+			page:     maxInt,
+			pageSize: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			// 调用 Service
+			messages, err := svc.ListMessages(
+				ctx,
+				1, // userID
+				1, // conversationID
+				tt.page,
+				tt.pageSize,
+			)
+
+			// 断言 1：必须返回 ErrInvalidPagination
+			if !errors.Is(err, ErrInvalidPagination) {
+				t.Fatalf(
+					"page=%d, pageSize=%d: 期望 ErrInvalidPagination，实际错误: %v",
+					tt.page,
+					tt.pageSize,
+					err,
+				)
+			}
+
+			// 断言 2：非法分页不能返回消息
+			if messages != nil {
+				t.Fatalf(
+					"page=%d, pageSize=%d: 期望 nil，实际返回: %+v",
+					tt.page,
+					tt.pageSize,
+					messages,
+				)
+			}
+		})
+	}
+}

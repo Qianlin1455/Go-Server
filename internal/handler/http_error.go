@@ -15,7 +15,8 @@ func WriteServiceerror(c *gin.Context, err error) {
 
 	switch {
 	case errors.Is(err, service.ErrInvalidMessageInput),
-		errors.Is(err, service.ErrInvalidRegisterInput):
+		errors.Is(err, service.ErrInvalidRegisterInput),
+		errors.Is(err, service.ErrInvalidPagination):
 		status = http.StatusBadRequest
 		code = "INVALID_ARGUMENT"
 		message = "请求参数不合法"
@@ -49,7 +50,7 @@ func WriteServiceerror(c *gin.Context, err error) {
 	}
 
 	c.JSON(status, gin.H{
-		"code":   code,
-		"mesage": message,
+		"code":    code,
+		"message": message,
 	})
 }

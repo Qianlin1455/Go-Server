@@ -139,6 +139,24 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 		})
 		return
 	}
+	pageStr := c.DefaultQuery("page", "1")
+	page, err := strconv.Atoi(pageStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "page 必须是整数",
+		})
+		return
+	}
+	pageSizeStr := c.DefaultQuery("page_size", "20")
+	pageSize, err := strconv.Atoi(pageSizeStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "page_size 必须是整数",
+		})
+		return
+	}
 
 	// 3. 调用 Service 查询历史消息
 	// Service 负责检查会话是否存在及用户权限
@@ -146,6 +164,8 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 		c.Request.Context(),
 		userID,
 		conversationID,
+		page,
+		pageSize,
 	)
 
 	if err != nil {

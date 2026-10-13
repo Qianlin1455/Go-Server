@@ -17,6 +17,7 @@ var (
 	ErrMessageNotFound     = errors.New("message not found")
 	ErrInvalidMessageInput = errors.New("invalid message input")
 	// conversation 相关错误复用已有定义
+	ErrInvalidPagination = errors.New("invalid pagination")
 )
 
 type SendMessageInput struct {
@@ -142,7 +143,18 @@ func (s *MessageService) ListMessages(
 	ctx context.Context,
 	userID uint64,
 	conversationID uint64,
+	page int,
+	pageSize int,
 ) ([]MessageResult, error) {
+	//0、分页参数校验
+	if page < 1 || pageSize < 1 || pageSize > 100 {
+		return nil, ErrInvalidPagination
+	}
+	maxInt := int(^uint(0) >> 1)
+
+	if page-1 > maxInt/pageSize {
+		return nil, ErrInvalidPagination
+	}
 
 	// 1. 权限校验
 	_, err := repository.GetConversationByID(
@@ -169,7 +181,10 @@ func (s *MessageService) ListMessages(
 	messages, err := repository.ListMessages(
 		ctx,
 		s.db,
+		userID,
 		conversationID,
+		page,
+		pageSize,
 	)
 
 	if err != nil {

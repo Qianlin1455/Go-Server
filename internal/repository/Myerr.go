@@ -3,9 +3,10 @@ package repository
 import "errors"
 
 var (
-	ErrNotFound         = errors.New("resource not found")
-	ErrAlreadyExists    = errors.New("resource already exists")
-	ErrInvalidReference = errors.New("invalid reference")
-	ErrStorage          = errors.New("storage failure")
-	ErrUserNotFound     = errors.New("user not found")
+	ErrNotFound          = errors.New("resource not found")
+	ErrAlreadyExists     = errors.New("resource already exists")
+	ErrInvalidReference  = errors.New("invalid reference")
+	ErrStorage           = errors.New("storage failure")
+	ErrUserNotFound      = errors.New("user not found")
+	ErrInvalidPagination = errors.New("invalid pagination")
 )
