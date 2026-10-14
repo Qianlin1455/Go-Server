@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	_ "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -73,6 +72,10 @@ func GetUserByEmail(
 		First(&user).Error
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
 		}

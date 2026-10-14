@@ -1,10 +1,10 @@
 package handler
 
 import (
+	"GoServer/internal/service"
+	"context"
 	"errors"
 	"net/http"
-
-	"GoServer/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -40,6 +40,10 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusNotFound
 		code = "NOT_FOUND"
 		message = "会话不存在"
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+		code = "DEADLINE_EXCEEDED"
+		message = "请求处理超时"
 
 	default:
 		//保留内部错误
