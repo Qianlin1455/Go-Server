@@ -30,6 +30,61 @@ func main() {
 		log.Fatalf("获取数据库连接池失败: %v", err)
 	}
 	defer sqlDB.Close()
+	// 1. 读取第一次快照
+	previous := sqlDB.Stats()
+
+	// 2. 创建退出信号
+	stopStats := make(chan struct{})
+	defer close(stopStats)
+
+	// 3. 启动监控 goroutine
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// 4. 读取当前快照
+				current := sqlDB.Stats()
+
+				// 5. 计算增量
+				waitCountDelta :=
+					current.WaitCount - previous.WaitCount
+
+				waitDurationDelta :=
+					current.WaitDuration - previous.WaitDuration
+
+				var avgWait time.Duration
+
+				if waitCountDelta > 0 {
+					avgWait = waitDurationDelta /
+						time.Duration(waitCountDelta)
+				}
+
+				// 6. 打印统计结果
+				log.Printf(
+					"DB Pool: Open=%d InUse=%d Idle=%d "+
+						"WaitCount=%d Delta=%d "+
+						"WaitDuration=%s Delta=%s AvgWait=%s",
+					current.OpenConnections,
+					current.InUse,
+					current.Idle,
+					current.WaitCount,
+					waitCountDelta,
+					current.WaitDuration,
+					waitDurationDelta,
+					avgWait,
+				)
+
+				// 7. 更新上一轮快照
+				previous = current
+
+			case <-stopStats:
+				return
+			}
+		}
+	}()
 
 	// ========================================
 	// 2. 初始化 JWTManager

@@ -1,14 +1,14 @@
 package service
 
 import (
+	"GoServer/internal/model"
+	"GoServer/internal/repository"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
-
-	"GoServer/internal/model"
-	"GoServer/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -146,6 +146,15 @@ func (s *MessageService) ListMessages(
 	page int,
 	pageSize int,
 ) ([]MessageResult, error) {
+	start := time.Now()
+
+	defer func() {
+		log.Printf(
+			"[PERF] ListMessages service_total=%s",
+			time.Since(start),
+		)
+	}()
+
 	//0、分页参数校验
 	if page < 1 || pageSize < 1 || pageSize > 100 {
 		return nil, ErrInvalidPagination
@@ -156,12 +165,20 @@ func (s *MessageService) ListMessages(
 		return nil, ErrInvalidPagination
 	}
 
+	ownershipStart := time.Now()
+
 	// 1. 权限校验
 	_, err := repository.GetConversationByID(
 		ctx,
 		s.db,
 		userID,
 		conversationID,
+	)
+
+	// 记录耗时
+	log.Printf(
+		"[PERF] GetConversationByID=%s",
+		time.Since(ownershipStart),
 	)
 
 	if err != nil {
@@ -177,6 +194,9 @@ func (s *MessageService) ListMessages(
 		}
 	}
 
+	// 记录消息查询开始时间
+	queryStart := time.Now()
+
 	// 2. 查询消息
 	messages, err := repository.ListMessages(
 		ctx,
@@ -185,6 +205,12 @@ func (s *MessageService) ListMessages(
 		conversationID,
 		page,
 		pageSize,
+	)
+
+	// 记录消息查询耗时
+	log.Printf(
+		"[PERF] Repository.ListMessages=%s",
+		time.Since(queryStart),
 	)
 
 	if err != nil {
