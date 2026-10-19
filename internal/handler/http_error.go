@@ -44,6 +44,17 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusGatewayTimeout
 		code = "DEADLINE_EXCEEDED"
 		message = "请求处理超时"
+	case errors.Is(err, service.ErrInvalidMessageInput),
+		errors.Is(err, service.ErrInvalidRegisterInput),
+		errors.Is(err, service.ErrInvalidPagination),
+		errors.Is(err, service.ErrInvalidProjectInput):
+		status = http.StatusBadRequest
+		code = "INVALID_ARGUMENT"
+		message = "请求参数不合法"
+	case errors.Is(err, service.ErrProjectAlreadyExists):
+		status = http.StatusConflict
+		code = "PROJECT_ALREADY_EXISTS"
+		message = "项目名称已存在"
 
 	default:
 		//保留内部错误

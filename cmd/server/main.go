@@ -108,6 +108,9 @@ func main() {
 	authService := service.NewAuthService(db, jwtManager)
 	authHandler := handler.NewAuthHandler(authService)
 
+	projectService := service.NewProjectService(db)
+	projectHandler := handler.NewProjectHandler(projectService)
+
 	conversationService := service.NewConversationService(db)
 	conversationHandler := handler.NewConversationHandler(
 		conversationService,
@@ -180,6 +183,7 @@ func main() {
 			"/conversations/:id/messages",
 			messageHandler.ListMessages,
 		)
+		private.POST("/projects", projectHandler.CreateProject)
 	}
 	// ========================================
 	// 7. 启动 HTTP Server
