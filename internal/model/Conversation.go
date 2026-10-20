@@ -10,6 +10,6 @@ type Conversation struct {
 	Title     string    `gorm:"column:title;type:varchar(255);not null"`
 	CreatedAt time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoCreateTime"`
 	UpdatedAt time.Time `gorm:"column:updated_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoUpdateTime"`
-
-	User Users `gorm:"foreignKey:UserID;references:ID;constraint:OnDelete:CASCADE"`
+	ProjectID *uint64   `gorm:"column:project_id"`
+	User      Users     `gorm:"foreignKey:UserID;references:ID;constraint:OnDelete:CASCADE"`
 }

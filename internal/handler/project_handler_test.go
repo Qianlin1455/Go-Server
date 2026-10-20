@@ -1,12 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,32 +18,72 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestCreateProjectAPI(t *testing.T) {
+func TestListProjectsAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// 1. 使用现有测试数据库事务，测试结束后回滚。
 	tx := setupMessageAPITestDB(t)
-
+	ctx := context.Background()
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
 
+	// 1. 创建测试用户
 	userA := &model.Users{
-		UserName: "project_api_a_" + suffix,
-		Email:    "project_api_a_" + suffix + "@test.com",
+		UserName: "list_api_a_" + suffix,
+		Email:    "list_api_a_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 	userB := &model.Users{
-		UserName: "project_api_b_" + suffix,
-		Email:    "project_api_b_" + suffix + "@test.com",
+		UserName: "list_api_b_" + suffix,
+		Email:    "list_api_b_" + suffix + "@test.com",
 		Password: "test-hash",
 	}
 
 	for _, user := range []*model.Users{userA, userB} {
-		if err := tx.Create(user).Error; err != nil {
-			t.Fatalf("创建测试用户失败: %v", err)
+		if err := tx.WithContext(ctx).Create(user).Error; err != nil {
+			t.Fatalf("创建用户失败: %v", err)
 		}
 	}
 
-	// 2. 创建真实 JWT。
+	// 2. 创建用户 A 的 21 个项目
+	base := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+
+	projectIDs := make([]uint64, 0, 21)
+
+	for i := 0; i < 21; i++ {
+		createdAt := base.Add(time.Minute)
+
+		// 最后插入的项目 ID 最大，但创建时间最早
+		// 验证 created_at 的排序优先于 id
+		if i == 20 {
+			createdAt = base
+		}
+
+		project := &model.Project{
+			UserID:    userA.ID,
+			Name:      fmt.Sprintf("list_a_%s_%d", suffix, i),
+			Status:    model.ProjectStatusActive,
+			CreatedAt: createdAt,
+		}
+
+		if err := tx.WithContext(ctx).Create(project).Error; err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+
+		projectIDs = append(projectIDs, project.ID)
+	}
+
+	// 3. 创建用户 B 的项目
+	projectB := &model.Project{
+		UserID:    userB.ID,
+		Name:      "list_b_" + suffix,
+		Status:    model.ProjectStatusActive,
+		CreatedAt: base.Add(2 * time.Minute),
+	}
+
+	if err := tx.WithContext(ctx).Create(projectB).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. JWT
 	manager, err := security.NewJWTManager(
 		"0123456789abcdef0123456789abcdef",
 		time.Hour,
@@ -62,22 +102,16 @@ func TestCreateProjectAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 3. 注册真实 Handler 和 JWT 中间件。
+	// 5. Router
 	r := gin.New()
 	h := NewProjectHandler(service.NewProjectService(tx))
 
 	private := r.Group("/api/v1")
 	private.Use(midware.JWTAuth(manager))
-	private.POST("/projects", h.CreateProject)
+	private.GET("/projects", h.ListProjects)
 
-	// 4. 统一构造 HTTP 请求。
-	request := func(token, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(
-			http.MethodPost,
-			"/api/v1/projects",
-			strings.NewReader(body),
-		)
-		req.Header.Set("Content-Type", "application/json")
+	request := func(path, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
 
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -88,142 +122,164 @@ func TestCreateProjectAPI(t *testing.T) {
 		return w
 	}
 
-	// 5. 未认证请求：应该在进入 Handler 前被拒绝。
-	t.Run("缺少JWT", func(t *testing.T) {
-		w := request("", `{"name":"project-a"}`)
+	type listResponse struct {
+		Code string `json:"code"`
+		Data []struct {
+			ID   uint64 `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
 
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("期望 401，实际 %d: %s", w.Code, w.Body.String())
-		}
-	})
+	decode := func(t *testing.T, w *httptest.ResponseRecorder) listResponse {
+		t.Helper()
 
-	// 6. 非法 JSON：返回 400。
-	t.Run("非法JSON", func(t *testing.T) {
-		w := request(tokenA, `{`)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("期望 400，实际 %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	// 7. 空白名称：由 Service 拒绝。
-	t.Run("空白项目名称", func(t *testing.T) {
-		w := request(tokenA, `{"name":"   "}`)
-
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("期望 400，实际 %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	// 8. 正常创建：验证 HTTP 响应与数据库写入。
-	t.Run("正常创建", func(t *testing.T) {
-		w := request(tokenA, `{
-			"name":"  project-api-success  ",
-			"description":"integration test"
-		}`)
-
-		if w.Code != http.StatusCreated {
-			t.Fatalf("期望 201，实际 %d: %s", w.Code, w.Body.String())
+		if w.Code != http.StatusOK {
+			t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
 		}
 
-		var body struct {
-			Code string `json:"code"`
-			Data struct {
-				ID          uint64  `json:"id"`
-				Name        string  `json:"name"`
-				Description *string `json:"description"`
-				Status      string  `json:"status"`
-			} `json:"data"`
-		}
-
+		var body listResponse
 		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-			t.Fatalf("解析响应失败: %v", err)
+			t.Fatal(err)
 		}
 
 		if body.Code != "SUCCESS" {
 			t.Fatalf("业务码错误: %s", body.Code)
 		}
-		if body.Data.ID == 0 {
-			t.Fatal("项目 ID 不应为 0")
-		}
-		if body.Data.Name != "project-api-success" {
-			t.Fatalf("名称未规范化: %q", body.Data.Name)
-		}
-		if body.Data.Status != model.ProjectStatusActive {
-			t.Fatalf("初始状态错误: %s", body.Data.Status)
+
+		return body
+	}
+
+	// 6. 默认分页：第一页应该返回 20 条
+	t.Run("默认分页", func(t *testing.T) {
+		body := decode(t, request("/api/v1/projects", tokenA))
+
+		if len(body.Data) != 20 {
+			t.Fatalf("期望 20 条，实际 %d", len(body.Data))
 		}
 
-		var stored model.Project
-		if err := tx.First(&stored, body.Data.ID).Error; err != nil {
-			t.Fatalf("数据库中未找到项目: %v", err)
-		}
-		if stored.UserID != userA.ID {
-			t.Fatalf("项目归属错误: want=%d got=%d", userA.ID, stored.UserID)
+		// 前 20 个项目创建时间相同，按 ID 降序
+		for i, p := range body.Data {
+			wantID := projectIDs[19-i]
+
+			if p.ID != wantID {
+				t.Fatalf(
+					"排序错误: index=%d want=%d got=%d",
+					i, wantID, p.ID,
+				)
+			}
+
+			if p.ID == projectB.ID {
+				t.Fatal("查询到了用户 B 的项目")
+			}
 		}
 	})
 
-	// 9. 同一用户重复创建同名项目：返回 409。
-	t.Run("重复项目名称", func(t *testing.T) {
-		name := "project-api-duplicate-" + suffix
-
-		first := request(tokenA, fmt.Sprintf(`{"name":%q}`, name))
-		if first.Code != http.StatusCreated {
-			t.Fatalf("首次创建失败: %d %s", first.Code, first.Body.String())
-		}
-
-		second := request(tokenA, fmt.Sprintf(`{"name":%q}`, name))
-		if second.Code != http.StatusConflict {
-			t.Fatalf("期望 409，实际 %d: %s", second.Code, second.Body.String())
-		}
-
-		var body struct {
-			Code string `json:"code"`
-		}
-		if err := json.Unmarshal(second.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		if body.Code != "PROJECT_ALREADY_EXISTS" {
-			t.Fatalf("业务码错误: %s", body.Code)
-		}
-	})
-
-	// 10. 不同用户可以创建同名项目。
-	t.Run("不同用户可以同名", func(t *testing.T) {
-		name := "project-api-shared-name-" + suffix
-
-		wA := request(tokenA, fmt.Sprintf(`{"name":%q}`, name))
-		wB := request(tokenB, fmt.Sprintf(`{"name":%q}`, name))
-
-		if wA.Code != http.StatusCreated {
-			t.Fatalf("用户 A 创建失败: %d %s", wA.Code, wA.Body.String())
-		}
-		if wB.Code != http.StatusCreated {
-			t.Fatalf("用户 B 创建失败: %d %s", wB.Code, wB.Body.String())
-		}
-	})
-
-	// 11. 请求体伪造 user_id：不能改变实际归属。
-	t.Run("不能伪造项目归属", func(t *testing.T) {
-		name := "project-api-owner-" + suffix
-		payload := fmt.Sprintf(
-			`{"name":%q,"user_id":%d}`,
-			name,
-			userB.ID,
+	// 7. 第二页只有创建时间最早的项目
+	t.Run("第二页", func(t *testing.T) {
+		body := decode(t,
+			request("/api/v1/projects?page=2", tokenA),
 		)
 
-		w := request(tokenA, payload)
-		if w.Code != http.StatusCreated {
-			t.Fatalf("创建失败: %d %s", w.Code, w.Body.String())
+		if len(body.Data) != 1 {
+			t.Fatalf("期望 1 条，实际 %d", len(body.Data))
 		}
 
-		var stored model.Project
-		if err := tx.Where("name = ? AND user_id = ?", name, userA.ID).
-			First(&stored).Error; err != nil {
-			t.Fatalf("项目没有归属于 JWT 用户 A: %v", err)
-		}
-
-		if stored.UserID != userA.ID {
-			t.Fatalf("归属被伪造: want=%d got=%d", userA.ID, stored.UserID)
+		if body.Data[0].ID != projectIDs[20] {
+			t.Fatal("第二页项目错误")
 		}
 	})
+
+	// 8. 自定义分页
+	t.Run("自定义分页", func(t *testing.T) {
+		body := decode(t,
+			request("/api/v1/projects?page=1&page_size=2", tokenA),
+		)
+
+		if len(body.Data) != 2 {
+			t.Fatalf("期望 2 条，实际 %d", len(body.Data))
+		}
+
+		if body.Data[0].ID != projectIDs[19] ||
+			body.Data[1].ID != projectIDs[18] {
+			t.Fatal("自定义分页排序错误")
+		}
+	})
+
+	// 9. 用户 B 只能看到自己的项目
+	t.Run("用户隔离", func(t *testing.T) {
+		body := decode(t, request("/api/v1/projects", tokenB))
+
+		if len(body.Data) != 1 ||
+			body.Data[0].ID != projectB.ID {
+			t.Fatalf("用户隔离失败: %+v", body.Data)
+		}
+	})
+
+	// 10. 超出最后一页
+	t.Run("空页", func(t *testing.T) {
+		body := decode(t,
+			request("/api/v1/projects?page=3", tokenA),
+		)
+
+		if body.Data == nil || len(body.Data) != 0 {
+			t.Fatalf("应返回空数组: %+v", body.Data)
+		}
+	})
+
+	// 11. JWT 校验
+	authCases := []struct {
+		name  string
+		token string
+	}{
+		{"缺少JWT", ""},
+		{"非法JWT", "invalid.token.value"},
+	}
+
+	for _, tc := range authCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := request("/api/v1/projects", tc.token)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf(
+					"期望 401，实际 %d: %s",
+					w.Code, w.Body.String(),
+				)
+			}
+		})
+	}
+
+	// 12. 非法分页参数
+	maxInt := int(^uint(0) >> 1)
+
+	invalidCases := []struct {
+		name string
+		path string
+	}{
+		{"page为0", "/api/v1/projects?page=0"},
+		{"page为负数", "/api/v1/projects?page=-1"},
+		{"page非法字符串", "/api/v1/projects?page=abc"},
+		{"pageSize为0", "/api/v1/projects?page_size=0"},
+		{"pageSize超过100", "/api/v1/projects?page_size=101"},
+		{"pageSize非法字符串", "/api/v1/projects?page_size=abc"},
+		{
+			"OFFSET溢出",
+			fmt.Sprintf(
+				"/api/v1/projects?page=%d&page_size=100",
+				maxInt,
+			),
+		},
+	}
+
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := request(tc.path, tokenA)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"期望 400，实际 %d: %s",
+					w.Code, w.Body.String(),
+				)
+			}
+		})
+	}
 }

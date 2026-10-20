@@ -184,6 +184,12 @@ func main() {
 			messageHandler.ListMessages,
 		)
 		private.POST("/projects", projectHandler.CreateProject)
+		private.GET("/projects/:id", projectHandler.GetProject)
+		private.GET("/projects", projectHandler.ListProjects)
+		private.GET(
+			"/projects/:id/conversations",
+			conversationHandler.ListProjectConversations,
+		)
 	}
 	// ========================================
 	// 7. 启动 HTTP Server

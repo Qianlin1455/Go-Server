@@ -55,6 +55,10 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusConflict
 		code = "PROJECT_ALREADY_EXISTS"
 		message = "项目名称已存在"
+	case errors.Is(err, service.ErrProjectNotFound):
+		status = http.StatusNotFound
+		code = "NOT_FOUND"
+		message = "项目不存在"
 
 	default:
 		//保留内部错误

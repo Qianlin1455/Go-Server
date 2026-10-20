@@ -15,7 +15,8 @@ type ConversationHandler struct {
 }
 
 type CreateConversationRequest struct {
-	Title string `json:"title" binding:"required"`
+	Title     string  `json:"title" binding:"required"`
+	ProjectID *uint64 `json:"project_id"`
 }
 
 func NewConversationHandler(
@@ -47,17 +48,15 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 
-	result, err := h.svc.CreateConversation(
+	result, err := h.svc.CreateConversationWithProject(
 		c.Request.Context(),
 		userID,
 		req.Title,
+		req.ProjectID,
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code":    "INTERNAL_ERROR",
-			"message": err.Error(),
-		})
+		WriteServiceerror(c, err)
 		return
 	}
 
@@ -108,5 +107,80 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": "SUCCESS",
 		"data": result,
+	})
+}
+
+func (h *ConversationHandler) ListProjectConversations(
+	c *gin.Context,
+) {
+	// 1. 获取 JWT 用户身份
+	userID, ok := midware.UserIDFromContext(
+		c.Request.Context(),
+	)
+
+	if !ok || userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":    "UNAUTHORIZED",
+			"message": "用户身份无效",
+		})
+		return
+	}
+
+	// 2. 解析 URL 中的项目 ID
+	projectID, err := strconv.ParseUint(
+		c.Param("id"),
+		10,
+		64,
+	)
+
+	if err != nil || projectID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "无效的项目 ID",
+		})
+		return
+	}
+
+	// 3. 解析分页参数
+	pageStr := c.DefaultQuery("page", "1")
+	pageSizeStr := c.DefaultQuery("page_size", "20")
+
+	page, err := strconv.Atoi(pageStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "page 必须是整数",
+		})
+		return
+	}
+
+	pageSize, err := strconv.Atoi(pageSizeStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "page_size 必须是整数",
+		})
+		return
+	}
+
+	// 4. 调用 Service
+	conversations, err := h.svc.ListProjectConversations(
+		c.Request.Context(),
+		userID,
+		projectID,
+		page,
+		pageSize,
+	)
+
+	// 5. 统一错误映射
+	if err != nil {
+		WriteServiceerror(c, err)
+		return
+	}
+
+	// 6. 返回项目内会话列表
+	c.JSON(http.StatusOK, gin.H{
+		"code": "SUCCESS",
+		"data": conversations,
 	})
 }

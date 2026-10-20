@@ -99,3 +99,42 @@ func TouchConversation(
 
 	return nil
 }
+
+func ListProjectConversations(
+	ctx context.Context,
+	db *gorm.DB,
+	userID uint64,
+	projectID uint64,
+	page int,
+	pageSize int,
+) ([]model.Conversation, error) {
+
+	if userID < 1 || projectID < 1 {
+		return nil, fmt.Errorf("Invalid Argument:%w", ErrInvalidReference)
+	}
+	if page < 1 || pageSize < 1 || pageSize > 100 {
+		return nil, ErrInvalidPagination
+	}
+
+	maxInt := int(^uint(0) >> 1)
+
+	if page-1 > maxInt/pageSize {
+		return nil, ErrInvalidPagination
+	}
+
+	res := make([]model.Conversation, 0)
+
+	result := db.WithContext(ctx).Model(&model.Conversation{}).
+		Select("*").Where("user_id = ? AND project_id = ?", userID, projectID).
+		Order("created_at DESC").Order("id DESC").Scopes(Paginate(page, pageSize)).Find(&res)
+	if result.Error == nil {
+		return res, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, fmt.Errorf(
+		"查询失败:%w",
+		errors.Join(ErrStorage, result.Error),
+	)
+}
