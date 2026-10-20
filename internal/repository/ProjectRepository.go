@@ -43,3 +43,68 @@ func CreateProject(
 		ErrStorage,
 	)
 }
+
+func GetProjectByID(ctx context.Context, db *gorm.DB, userID uint64, projectID uint64) (*model.Project, error) {
+	proj := model.Project{}
+	result := db.WithContext(ctx).Where("id = ? AND user_id = ?", projectID, userID).First(&proj)
+	if result.Error == nil {
+		return &proj, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf(
+		"get project: %w",
+		errors.Join(ErrStorage, result.Error),
+	)
+}
+
+func ListProjects(
+	ctx context.Context,
+	db *gorm.DB,
+	userID uint64,
+	page int,
+	pageSize int,
+) ([]model.Project, error) {
+	projects := make([]model.Project, 0)
+
+	// 1. 分页参数校验
+	if page < 1 || pageSize < 1 || pageSize > 100 {
+		return nil, ErrInvalidPagination
+	}
+
+	// 2. 防止 OFFSET 整数溢出
+	maxInt := int(^uint(0) >> 1)
+
+	if page-1 > maxInt/pageSize {
+		return nil, ErrInvalidPagination
+	}
+
+	// 3. 用户隔离、稳定排序、分页查询
+	result := db.WithContext(ctx).
+		Model(&model.Project{}).
+		Where("projects.user_id = ?", userID).
+		Order("projects.created_at DESC").
+		Order("projects.id DESC").
+		Scopes(Paginate(page, pageSize)).
+		Find(&projects)
+
+	// 4. 查询成功
+	if result.Error == nil {
+		return projects, nil
+	}
+
+	// 5. Context 取消或超时
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// 6. 其他数据库错误
+	return nil, fmt.Errorf(
+		"list projects: %w",
+		errors.Join(ErrStorage, result.Error),
+	)
+}
