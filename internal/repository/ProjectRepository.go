@@ -76,12 +76,11 @@ func ListProjects(
 		return nil, ErrInvalidPagination
 	}
 
-	// 2. 防止 OFFSET 整数溢出
 	maxInt := int(^uint(0) >> 1)
-
 	if page-1 > maxInt/pageSize {
 		return nil, ErrInvalidPagination
 	}
+	offset := (page - 1) * pageSize
 
 	// 3. 用户隔离、稳定排序、分页查询
 	result := db.WithContext(ctx).
@@ -89,7 +88,8 @@ func ListProjects(
 		Where("projects.user_id = ?", userID).
 		Order("projects.created_at DESC").
 		Order("projects.id DESC").
-		Scopes(Paginate(page, pageSize)).
+		Offset(offset).
+		Limit(pageSize).
 		Find(&projects)
 
 	// 4. 查询成功
