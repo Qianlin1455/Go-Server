@@ -608,3 +608,238 @@ func TestListTasks(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateTaskStatusCAS(t *testing.T) {
+	tx := setupTestTx(t)
+	ctx := context.Background()
+	suffix := testSuffix()
+
+	// 1. 创建两个测试用户
+	userA := &model.Users{
+		UserName: "cas_a_" + suffix,
+		Email:    "cas_a_" + suffix + "@example.com",
+		Password: "test-hash",
+	}
+
+	userB := &model.Users{
+		UserName: "cas_b_" + suffix,
+		Email:    "cas_b_" + suffix + "@example.com",
+		Password: "test-hash",
+	}
+
+	for _, user := range []*model.Users{userA, userB} {
+		if err := CreateUser(ctx, tx, user); err != nil {
+			t.Fatalf("创建用户失败: %v", err)
+		}
+	}
+
+	// 2. 创建两个项目
+	projectA := &model.Project{
+		UserID: userA.ID,
+		Name:   "cas_project_a_" + suffix,
+	}
+
+	projectB := &model.Project{
+		UserID: userB.ID,
+		Name:   "cas_project_b_" + suffix,
+	}
+
+	for _, project := range []*model.Project{projectA, projectB} {
+		if err := CreateProject(ctx, tx, project); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+
+	// 3. 创建初始 Task
+	task := &model.Task{
+		UserID:    userA.ID,
+		ProjectID: projectA.ID,
+		Title:     "CAS 乐观锁测试",
+	}
+
+	if err := CreateTask(ctx, tx, task); err != nil {
+		t.Fatalf("创建 Task 失败: %v", err)
+	}
+
+	if task.Status != model.TaskStatusTodo || task.Version != 1 {
+		t.Fatalf(
+			"初始状态异常: status=%s, version=%d",
+			task.Status, task.Version,
+		)
+	}
+
+	doneTime := time.Now().UTC().Truncate(time.Millisecond)
+
+	// 4. 表驱动测试
+	cases := []struct {
+		name          string
+		userID        uint64
+		projectID     uint64
+		from          string
+		to            string
+		version       uint32
+		completedAt   *time.Time
+		wantRows      int64
+		wantStatus    string
+		wantVersion   uint32
+		wantCompleted bool
+	}{
+		{
+			name:        "错误用户无法更新",
+			userID:      userB.ID,
+			projectID:   projectA.ID,
+			from:        "todo",
+			to:          "doing",
+			version:     1,
+			wantRows:    0,
+			wantStatus:  "todo",
+			wantVersion: 1,
+		},
+		{
+			name:        "错误项目无法更新",
+			userID:      userA.ID,
+			projectID:   projectB.ID,
+			from:        "todo",
+			to:          "doing",
+			version:     1,
+			wantRows:    0,
+			wantStatus:  "todo",
+			wantVersion: 1,
+		},
+		{
+			name:        "正确版本更新成功",
+			userID:      userA.ID,
+			projectID:   projectA.ID,
+			from:        "todo",
+			to:          "doing",
+			version:     1,
+			wantRows:    1,
+			wantStatus:  "doing",
+			wantVersion: 2,
+		},
+		{
+			name:        "旧版本更新失败",
+			userID:      userA.ID,
+			projectID:   projectA.ID,
+			from:        "todo",
+			to:          "doing",
+			version:     1,
+			wantRows:    0,
+			wantStatus:  "doing",
+			wantVersion: 2,
+		},
+		{
+			name:        "旧状态更新失败",
+			userID:      userA.ID,
+			projectID:   projectA.ID,
+			from:        "todo",
+			to:          "done",
+			version:     2,
+			wantRows:    0,
+			wantStatus:  "doing",
+			wantVersion: 2,
+		},
+		{
+			name:          "任务完成时设置时间",
+			userID:        userA.ID,
+			projectID:     projectA.ID,
+			from:          "doing",
+			to:            "done",
+			version:       2,
+			completedAt:   &doneTime,
+			wantRows:      1,
+			wantStatus:    "done",
+			wantVersion:   3,
+			wantCompleted: true,
+		},
+		{
+			name:          "重复完成请求不产生更新",
+			userID:        userA.ID,
+			projectID:     projectA.ID,
+			from:          "doing",
+			to:            "done",
+			version:       2,
+			completedAt:   &doneTime,
+			wantRows:      0,
+			wantStatus:    "done",
+			wantVersion:   3,
+			wantCompleted: true,
+		},
+	}
+
+	// 子测试按顺序执行，共用同一条 Task
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := UpdateTaskStatusCAS(
+				ctx,
+				tx,
+				tc.userID,
+				tc.projectID,
+				task.ID,
+				tc.from,
+				tc.to,
+				tc.version,
+				tc.completedAt,
+			)
+
+			if err != nil {
+				t.Fatalf("CAS 更新不应返回错误: %v", err)
+			}
+
+			if rows != tc.wantRows {
+				t.Fatalf(
+					"RowsAffected: want=%d, got=%d",
+					tc.wantRows, rows,
+				)
+			}
+
+			// 重新查询数据库，验证真实持久化结果
+			var stored model.Task
+
+			err = tx.WithContext(ctx).
+				Where("id = ?", task.ID).
+				First(&stored).Error
+
+			if err != nil {
+				t.Fatalf("重新查询 Task 失败: %v", err)
+			}
+
+			if stored.Status != tc.wantStatus {
+				t.Errorf(
+					"Status: want=%s, got=%s",
+					tc.wantStatus, stored.Status,
+				)
+			}
+
+			if stored.Version != tc.wantVersion {
+				t.Errorf(
+					"Version: want=%d, got=%d",
+					tc.wantVersion, stored.Version,
+				)
+			}
+
+			hasCompletedAt := stored.CompletedAt != nil
+
+			if hasCompletedAt != tc.wantCompleted {
+				t.Errorf(
+					"CompletedAt 是否非空: want=%v, got=%v",
+					tc.wantCompleted, hasCompletedAt,
+				)
+			}
+
+			if tc.wantCompleted && stored.CompletedAt != nil {
+				if !stored.CompletedAt.Equal(doneTime) {
+					t.Errorf(
+						"CompletedAt 不正确: want=%v, got=%v",
+						doneTime, *stored.CompletedAt,
+					)
+				}
+			}
+
+			t.Logf(
+				"RowsAffected=%d, Status=%s, Version=%d",
+				rows, stored.Status, stored.Version,
+			)
+		})
+	}
+}
