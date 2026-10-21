@@ -120,6 +120,9 @@ func main() {
 		messageService,
 	)
 
+	taskService := service.NewTaskService(db)
+	taskHandler := handler.NewTaskHandler(taskService)
+
 	// ========================================
 	// 4. 创建 Gin Engine
 	// ========================================
@@ -189,6 +192,21 @@ func main() {
 		private.GET(
 			"/projects/:id/conversations",
 			conversationHandler.ListProjectConversations,
+		)
+		// Task API
+		private.POST(
+			"/projects/:id/tasks",
+			taskHandler.CreateTask,
+		)
+
+		private.GET(
+			"/projects/:id/tasks",
+			taskHandler.ListTasks,
+		)
+
+		private.PATCH(
+			"/tasks/:id/status",
+			taskHandler.ChangeStatus,
 		)
 	}
 	// ========================================

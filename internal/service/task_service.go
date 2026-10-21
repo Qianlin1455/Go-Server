@@ -292,3 +292,83 @@ func (s *TaskService) CreateTask(
 
 	return created, nil
 }
+
+func (s *TaskService) ListTasks(
+	ctx context.Context,
+	userID uint64,
+	projectID uint64,
+	page int,
+	pageSize int,
+) ([]TaskResult, error) {
+
+	// 1. 基础参数校验
+	if userID == 0 || projectID == 0 {
+		return nil, ErrInvalidTaskInput
+	}
+
+	// 2. 分页参数校验
+	if page < 1 || pageSize < 1 || pageSize > 100 {
+		return nil, ErrInvalidPagination
+	}
+
+	// 3. OFFSET 溢出保护
+	maxInt := int(^uint(0) >> 1)
+
+	if page-1 > maxInt/pageSize {
+		return nil, ErrInvalidPagination
+	}
+
+	// 4. 校验项目存在且属于当前用户
+	_, err := repository.GetProjectByID(
+		ctx,
+		s.db,
+		userID,
+		projectID,
+	)
+
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrProjectNotFound
+		}
+
+		return nil, fmt.Errorf(
+			"get project: %w", err,
+		)
+	}
+
+	// 注意：归档项目仍然允许查询任务
+
+	// 5. 查询任务列表
+	tasks, err := repository.ListTasks(
+		ctx,
+		s.db,
+		userID,
+		projectID,
+		page,
+		pageSize,
+	)
+
+	if err != nil {
+		if errors.Is(
+			err, repository.ErrInvalidPagination,
+		) {
+			return nil, ErrInvalidPagination
+		}
+
+		return nil, fmt.Errorf(
+			"list tasks: %w", err,
+		)
+	}
+
+	// 6. Model 转 DTO
+	result := make([]TaskResult, 0, len(tasks))
+
+	for i := range tasks {
+		result = append(
+			result,
+			*toTaskResult(&tasks[i]),
+		)
+	}
+
+	return result, nil
+}
