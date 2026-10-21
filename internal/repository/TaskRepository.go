@@ -146,15 +146,12 @@ func UpdateTaskStatusCAS(
 	if userID < 1 || projectID < 1 || taskID < 1 {
 		return 0, ErrInvalidReference
 	}
-	if !canTransition(fromStatus, toStatus) {
-		return 0, ErrTaskStatusCannotTransit
-	}
 	result := db.WithContext(ctx).Model(&model.Task{}).
 		Where("id = ? AND user_id = ? AND project_id = ? AND status = ? AND version = ?",
 			taskID, userID, projectID, fromStatus, expectedVersion).
 		Updates(map[string]any{
 			"status":       toStatus,
-			"version":      expectedVersion + 1,
+			"version":      gorm.Expr("version + 1"),
 			"completed_at": completedAt,
 		})
 	if ctx.Err() != nil {
@@ -163,18 +160,5 @@ func UpdateTaskStatusCAS(
 	if result.Error != nil {
 		return 0, fmt.Errorf("update task status: %w", errors.Join(ErrStorage, result.Error))
 	}
-	if result.RowsAffected == 0 {
-		return 0, ErrNotFound
-	}
 	return result.RowsAffected, nil
-}
-
-func canTransition(from, to string) bool {
-	if from == "todo" && to == "doing" {
-		return true
-	}
-	if from == "doing" && (to == "done" || to == "todo") {
-		return true
-	}
-	return false
 }
