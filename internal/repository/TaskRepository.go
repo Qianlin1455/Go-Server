@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -129,4 +130,51 @@ func ListTasks(
 		"list tasks: %w",
 		errors.Join(ErrStorage, result.Error),
 	)
+}
+
+func UpdateTaskStatusCAS(
+	ctx context.Context,
+	db *gorm.DB,
+	userID uint64,
+	projectID uint64,
+	taskID uint64,
+	fromStatus string,
+	toStatus string,
+	expectedVersion uint32,
+	completedAt *time.Time,
+) (int64, error) {
+	if userID < 1 || projectID < 1 || taskID < 1 {
+		return 0, ErrInvalidReference
+	}
+	if !canTransition(fromStatus, toStatus) {
+		return 0, ErrTaskStatusCannotTransit
+	}
+	result := db.WithContext(ctx).Model(&model.Task{}).
+		Where("id = ? AND user_id = ? AND project_id = ? AND status = ? AND version = ?",
+			taskID, userID, projectID, fromStatus, expectedVersion).
+		Updates(map[string]any{
+			"status":       toStatus,
+			"version":      expectedVersion + 1,
+			"completed_at": completedAt,
+		})
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	if result.Error != nil {
+		return 0, fmt.Errorf("update task status: %w", errors.Join(ErrStorage, result.Error))
+	}
+	if result.RowsAffected == 0 {
+		return 0, ErrNotFound
+	}
+	return result.RowsAffected, nil
+}
+
+func canTransition(from, to string) bool {
+	if from == "todo" && to == "doing" {
+		return true
+	}
+	if from == "doing" && (to == "done" || to == "todo") {
+		return true
+	}
+	return false
 }
