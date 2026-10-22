@@ -90,6 +90,21 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusConflict
 		code = "INVALID_STATE_TRANSITION"
 		message = "不允许的任务状态转换"
+	case errors.Is(err, service.ErrInvalidEvidenceType):
+		status = http.StatusBadRequest
+		code = "INVALID_EVIDENCE_TYPE"
+		message = "证据类型不合法"
+
+	case errors.Is(err, service.ErrInvalidEvidenceStatus),
+		errors.Is(err, service.ErrInvalidEvidenceContent):
+		status = http.StatusBadRequest
+		code = "INVALID_EVIDENCE_CONTENT"
+		message = "证据状态或内容不合法"
+
+	case errors.Is(err, service.ErrTaskEvidenceRequired):
+		status = http.StatusConflict
+		code = "EVIDENCE_REQUIRED"
+		message = "任务完成前必须提交至少一条有效证据"
 
 	default:
 		//保留内部错误

@@ -123,6 +123,11 @@ func main() {
 	taskService := service.NewTaskService(db)
 	taskHandler := handler.NewTaskHandler(taskService)
 
+	evidenceService := service.NewEvidenceService(db)
+	evidenceHandler := handler.NewEvidenceHandler(
+		evidenceService,
+	)
+
 	// ========================================
 	// 4. 创建 Gin Engine
 	// ========================================
@@ -207,6 +212,10 @@ func main() {
 		private.PATCH(
 			"/tasks/:id/status",
 			taskHandler.ChangeStatus,
+		)
+		private.POST(
+			"/tasks/:id/evidence",
+			evidenceHandler.CreateEvidence,
 		)
 	}
 	// ========================================

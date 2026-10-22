@@ -21,6 +21,7 @@ var (
 	ErrTaskAlreadyExists        = errors.New("task already exists")
 	ErrTaskProjectArchived      = errors.New("Task project has been archived")
 	ErrTaskSourceMessageInvalid = errors.New("invalid task source message")
+	ErrTaskEvidenceRequired     = errors.New("task requires submitted evidence")
 )
 
 type TaskService struct {
@@ -135,6 +136,29 @@ func (s *TaskService) ChangeStatus(
 			if toStatus == model.TaskStatusDone {
 				now := time.Now().UTC()
 				completedAt = &now
+			}
+			// 进入 done 前，必须至少存在一条正式提交的证据
+			if toStatus == model.TaskStatusDone {
+				var count int64
+
+				err := tx.Model(&model.TaskEvidence{}).
+					Where(
+						"task_id = ? AND status = ?",
+						task.ID,
+						model.EvidenceStatusSubmitted,
+					).
+					Count(&count).Error
+
+				if err != nil {
+					return fmt.Errorf(
+						"count submitted evidence: %w",
+						err,
+					)
+				}
+
+				if count == 0 {
+					return ErrTaskEvidenceRequired
+				}
 			}
 
 			rowsAffected, err := repository.UpdateTaskStatusCAS(ctx, tx, userID, proj.ID, taskID, task.Status, toStatus, expectedVersion, completedAt)

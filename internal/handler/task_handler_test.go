@@ -193,22 +193,50 @@ func newTaskAPIFixture(t *testing.T) *taskAPIFixture {
 		}
 
 		err := db.Transaction(func(tx *gorm.DB) error {
+			// 1. 删除证据
 			if err := tx.Exec(
-				`DELETE FROM task_status_audits
-				 WHERE task_id IN (
-				     SELECT id FROM tasks
-				     WHERE user_id IN (?, ?)
-				 )`,
+				`DELETE FROM task_evidence
+				WHERE task_id IN (
+					SELECT id FROM tasks
+					WHERE user_id IN (?, ?)
+				)`,
 				f.userA.ID,
 				f.userB.ID,
 			).Error; err != nil {
-				return err
+				return fmt.Errorf("cleanup evidence: %w", err)
 			}
 
+			// 2. 删除审核
+			if err := tx.Exec(
+				`DELETE FROM task_reviews
+				WHERE task_id IN (
+					SELECT id FROM tasks
+					WHERE user_id IN (?, ?)
+				)`,
+				f.userA.ID,
+				f.userB.ID,
+			).Error; err != nil {
+				return fmt.Errorf("cleanup reviews: %w", err)
+			}
+
+			// 3. 删除状态审计
+			if err := tx.Exec(
+				`DELETE FROM task_status_audits
+				WHERE task_id IN (
+					SELECT id FROM tasks
+					WHERE user_id IN (?, ?)
+				)`,
+				f.userA.ID,
+				f.userB.ID,
+			).Error; err != nil {
+				return fmt.Errorf("cleanup audits: %w", err)
+			}
+
+			// 4. 删除 Task
 			if err := tx.Where(
 				"user_id IN ?", userIDs,
 			).Delete(&model.Task{}).Error; err != nil {
-				return err
+				return fmt.Errorf("cleanup tasks: %w", err)
 			}
 
 			if err := tx.Where(
@@ -261,6 +289,9 @@ func newTaskAPIFixture(t *testing.T) *taskAPIFixture {
 	// 注册真实 Gin Handler
 	f.router = gin.New()
 	h := NewTaskHandler(service.NewTaskService(db))
+	evidenceHandler := NewEvidenceHandler(
+		service.NewEvidenceService(db),
+	)
 
 	private := f.router.Group("/api/v1")
 	private.Use(midware.JWTAuth(manager))
@@ -269,6 +300,10 @@ func newTaskAPIFixture(t *testing.T) *taskAPIFixture {
 	private.GET("/projects/:id/tasks", h.ListTasks)
 	private.PATCH("/tasks/:id/status", h.ChangeStatus)
 
+	private.POST(
+		"/tasks/:id/evidence",
+		evidenceHandler.CreateEvidence,
+	)
 	return f
 }
 
@@ -757,6 +792,22 @@ func TestTaskHandlerAPI(t *testing.T) {
 
 	// 8. doing -> done
 	t.Run("doing到done成功", func(t *testing.T) {
+
+		// 为任务准备一条正式提交的证据
+		content := "go test ./... PASS"
+
+		evidence := &model.TaskEvidence{
+			TaskID:    taskID,
+			CreatedBy: f.userA.ID,
+			Type:      model.EvidenceTypeTestOutput,
+			Text:      &content,
+			Status:    model.EvidenceStatusSubmitted,
+		}
+
+		if err := f.db.Create(evidence).Error; err != nil {
+			t.Fatalf("准备 submitted 证据失败: %v", err)
+		}
+
 		w := f.request(
 			http.MethodPatch,
 			taskPath(taskID),

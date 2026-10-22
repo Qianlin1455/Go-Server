@@ -78,6 +78,10 @@ func newTaskStatusTestFixture(t *testing.T) (*gorm.DB, *model.Users, *model.Task
 	t.Cleanup(func() {
 		err := db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("task_id = ?", task.ID).
+				Delete(&model.TaskEvidence{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("task_id = ?", task.ID).
 				Delete(&model.TaskStatusAudit{}).Error; err != nil {
 				return err
 			}
@@ -144,6 +148,20 @@ func TestChangeStatus_Commit(t *testing.T) {
 		audits[0].ToStatus != model.TaskStatusDoing ||
 		audits[0].FromVersion != 1 || audits[0].ToVersion != 2 {
 		t.Fatalf("首次审计记录不正确: %+v", audits[0])
+	}
+
+	content := "go test -race ./... PASS"
+
+	evidence := &model.TaskEvidence{
+		TaskID:    task.ID,
+		CreatedBy: user.ID,
+		Type:      model.EvidenceTypeTestOutput,
+		Text:      &content,
+		Status:    model.EvidenceStatusSubmitted,
+	}
+
+	if err := db.Create(evidence).Error; err != nil {
+		t.Fatalf("准备完成证据失败: %v", err)
 	}
 
 	// 第二次转换：doing -> done。
@@ -385,4 +403,170 @@ func TestChangeStatus_ConcurrentCAS(t *testing.T) {
 		stored.Version,
 		len(audits),
 	)
+}
+
+func TestChangeStatus_EvidenceRequired(t *testing.T) {
+	db, user, task := newTaskStatusTestFixture(t)
+	svc := NewTaskService(db)
+	ctx := context.Background()
+
+	// 1. todo -> doing
+	err := svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDoing, 1,
+	)
+	if err != nil {
+		t.Fatalf("todo -> doing 失败: %v", err)
+	}
+
+	// 2. 没有证据，不能完成
+	err = svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDone, 2,
+	)
+
+	if !errors.Is(err, ErrTaskEvidenceRequired) {
+		t.Fatalf("无证据应拒绝完成，实际: %v", err)
+	}
+
+	// 3. 创建一条空草稿
+	draft := &model.TaskEvidence{
+		TaskID:    task.ID,
+		CreatedBy: user.ID,
+		Type:      model.EvidenceTypeTestOutput,
+		Status:    model.EvidenceStatusDraft,
+	}
+
+	if err := db.Create(draft).Error; err != nil {
+		t.Fatalf("创建草稿失败: %v", err)
+	}
+
+	// 4. 只有草稿，仍不能完成
+	err = svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDone, 2,
+	)
+
+	if !errors.Is(err, ErrTaskEvidenceRequired) {
+		t.Fatalf("只有草稿应拒绝完成，实际: %v", err)
+	}
+
+	// 5. 检查失败请求没有修改状态
+	stored := loadTaskState(t, db, task.ID)
+
+	if stored.Status != model.TaskStatusDoing ||
+		stored.Version != 2 ||
+		stored.CompletedAt != nil {
+		t.Fatalf("拒绝完成后状态异常: %+v", stored)
+	}
+
+	if audits := loadTaskAudits(t, db, task.ID); len(audits) != 1 {
+		t.Fatalf("拒绝完成不应新增审计，实际: %d", len(audits))
+	}
+
+	// 6. 创建正式提交的证据
+	content := "go test -race ./... PASS"
+
+	submitted := &model.TaskEvidence{
+		TaskID:    task.ID,
+		CreatedBy: user.ID,
+		Type:      model.EvidenceTypeTestOutput,
+		Text:      &content,
+		Status:    model.EvidenceStatusSubmitted,
+	}
+
+	if err := db.Create(submitted).Error; err != nil {
+		t.Fatalf("创建正式证据失败: %v", err)
+	}
+
+	// 7. 现在允许完成
+	err = svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDone, 2,
+	)
+	if err != nil {
+		t.Fatalf("有正式证据却无法完成: %v", err)
+	}
+
+	// 8. 验证最终状态与审计
+	stored = loadTaskState(t, db, task.ID)
+
+	if stored.Status != model.TaskStatusDone ||
+		stored.Version != 3 ||
+		stored.CompletedAt == nil {
+		t.Fatalf("任务完成状态异常: %+v", stored)
+	}
+
+	if audits := loadTaskAudits(t, db, task.ID); len(audits) != 2 {
+		t.Fatalf("预期2条状态审计，实际: %d", len(audits))
+	}
+}
+
+func TestChangeStatus_DoneRollbackWhenAuditFails(t *testing.T) {
+	db, user, task := newTaskStatusTestFixture(t)
+	svc := NewTaskService(db)
+	ctx := context.Background()
+
+	// 1. 先进入 doing
+	if err := svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDoing, 1,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. 准备正式证据
+	content := "并发测试通过"
+
+	evidence := &model.TaskEvidence{
+		TaskID:    task.ID,
+		CreatedBy: user.ID,
+		Type:      model.EvidenceTypeTestOutput,
+		Text:      &content,
+		Status:    model.EvidenceStatusSubmitted,
+	}
+
+	if err := db.Create(evidence).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. 提前占用审计版本 3
+	seed := &model.TaskStatusAudit{
+		TaskID:      task.ID,
+		ActorUserID: user.ID,
+		FromStatus:  model.TaskStatusDoing,
+		ToStatus:    model.TaskStatusDone,
+		FromVersion: 2,
+		ToVersion:   3,
+	}
+
+	if err := db.Create(seed).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. 尝试完成任务，审计 INSERT 应触发唯一冲突
+	err := svc.ChangeStatus(
+		ctx, user.ID, task.ID,
+		model.TaskStatusDone, 2,
+	)
+
+	if !errors.Is(err, repository.ErrAlreadyExists) {
+		t.Fatalf("预期审计唯一冲突，实际: %v", err)
+	}
+
+	// 5. 确认 CAS UPDATE 被回滚
+	stored := loadTaskState(t, db, task.ID)
+
+	if stored.Status != model.TaskStatusDoing ||
+		stored.Version != 2 ||
+		stored.CompletedAt != nil {
+		t.Fatalf("审计失败后任务没有正确回滚: %+v", stored)
+	}
+
+	// 6. 只存在原本的 doing 审计和预置审计
+	audits := loadTaskAudits(t, db, task.ID)
+
+	if len(audits) != 2 {
+		t.Fatalf("预期保留2条原有审计，实际: %d", len(audits))
+	}
 }
