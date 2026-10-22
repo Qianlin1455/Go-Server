@@ -1,35 +1,59 @@
 package repository
 
 import (
-	"GoServer/internal/database"
 	"GoServer/internal/model"
 	"context"
 	"errors"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
-// 初始化测试数据库
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	db, err := database.InitDB()
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Fatal("TEST_MYSQL_DSN 环境变量未设置")
+	}
+
+	db, err := gorm.Open(
+		mysql.Open(dsn),
+		&gorm.Config{TranslateError: true},
+	)
 	if err != nil {
-		t.Fatalf("数据库初始化失败: %v", err)
+		t.Fatalf("连接测试数据库失败: %v", err)
+	}
+
+	// 防止测试误操作开发数据库
+	var dbName string
+
+	err = db.Raw("SELECT DATABASE()").
+		Row().
+		Scan(&dbName)
+
+	if err != nil {
+		t.Fatalf("查询数据库名称失败: %v", err)
+	}
+
+	if dbName != "go_server_test" {
+		t.Fatalf(
+			"拒绝运行测试：当前数据库是 %s",
+			dbName,
+		)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		t.Fatalf("获取连接池失败: %v", err)
+		t.Fatal(err)
 	}
 
 	t.Cleanup(func() {
-		if err := sqlDB.Close(); err != nil {
-			t.Errorf("关闭连接池失败: %v", err)
-		}
+		_ = sqlDB.Close()
 	})
 
 	return db
