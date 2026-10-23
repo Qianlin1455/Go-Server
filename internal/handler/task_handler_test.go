@@ -298,6 +298,7 @@ func newTaskAPIFixture(t *testing.T) *taskAPIFixture {
 
 	private.POST("/projects/:id/tasks", h.CreateTask)
 	private.GET("/projects/:id/tasks", h.ListTasks)
+	private.GET("/tasks/:id/retrospective", h.Retrospective)
 	private.PATCH("/tasks/:id/status", h.ChangeStatus)
 
 	private.POST(

@@ -199,6 +199,7 @@ func main() {
 			conversationHandler.ListProjectConversations,
 		)
 		// Task API
+		private.GET("/tasks/:id/retrospective", taskHandler.Retrospective)
 		private.POST(
 			"/projects/:id/tasks",
 			taskHandler.CreateTask,

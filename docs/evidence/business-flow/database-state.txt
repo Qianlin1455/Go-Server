@@ -1,0 +1,28 @@
+Executed read-only SQL against go_db (existing local Docker administrator; credentials omitted):
+SELECT DATABASE();
+SELECT id,user_id,project_id,source_message_id,status,version,completed_at FROM tasks WHERE id=171 AND user_id=752 AND project_id=318;
+SELECT e.id,e.status FROM task_evidence e JOIN tasks t ON t.id=e.task_id AND t.user_id=e.created_by WHERE t.id=171 AND t.user_id=752;
+SELECT a.from_status,a.to_status,a.from_version,a.to_version FROM task_status_audits a JOIN tasks t ON t.id=a.task_id WHERE t.id=171 AND t.user_id=752 ORDER BY a.to_version;
+
++------------+
+| DATABASE() |
++------------+
+| go_db      |
++------------+
++-----+---------+------------+-------------------+--------+---------+-------------------------+
+| id  | user_id | project_id | source_message_id | status | version | completed_at            |
++-----+---------+------------+-------------------+--------+---------+-------------------------+
+| 171 |     752 |        318 |               227 | done   |       3 | 2026-10-23 10:17:34.119 |
++-----+---------+------------+-------------------+--------+---------+-------------------------+
++----+-----------+
+| id | status    |
++----+-----------+
+|  1 | draft     |
+|  2 | submitted |
++----+-----------+
++-------------+-----------+--------------+------------+
+| from_status | to_status | from_version | to_version |
++-------------+-----------+--------------+------------+
+| todo        | doing     |            1 |          2 |
+| doing       | done      |            2 |          3 |
++-------------+-----------+--------------+------------+

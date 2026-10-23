@@ -660,3 +660,13 @@ todo  ─────→ doing ─────→ done
 -   **Repository 不承担业务规则：** 保持数据访问与业务编排的职责边界。
 -   **版本化 SQL 是 Schema 的事实来源：** 不使用 GORM `AutoMigrate`
     替代现有迁移文件。
+
+## 14. v6.1 P0 实现记录（2026-10-23）
+
+本文第 12 节是历史开发记录，当前实现以 README 和路由为准。
+本次补齐任务列表过滤后的 total，并保留已有分页/过滤行为。
+为实现 2.2 的复盘场景，新增 JWT 保护的只读 `GET /api/v1/tasks/:id/retrospective`，
+聚合任务、当前可访问的来源消息、证据及审计，不实现完整 Review 或 AI 审核。
+来源限定同用户同项目；无来源或来源已不可访问时返回 null，证据/审计按归属查询。
+列表 Count/List 与复盘的多语句查询不保证并发写入时的同一快照。
+验收证据见 `docs/evidence/business-flow/README.md`，历史规划项不代表已上线。

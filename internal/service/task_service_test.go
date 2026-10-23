@@ -569,4 +569,5 @@ func TestChangeStatus_DoneRollbackWhenAuditFails(t *testing.T) {
 	if len(audits) != 2 {
 		t.Fatalf("预期保留2条原有审计，实际: %d", len(audits))
 	}
+	t.Logf("verified after unique audit INSERT failure: status=%s version=%d completed_at=%v audit_count=%d (unchanged)", stored.Status, stored.Version, stored.CompletedAt, len(audits))
 }

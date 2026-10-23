@@ -346,3 +346,17 @@ func (s *TaskService) ListTasks(
 
 	return result, nil
 }
+
+// ListTasksPage preserves the existing ListTasks contract for other callers.
+// List and Count are separate statements; concurrent writes can change their snapshots.
+func (s *TaskService) ListTasksPage(ctx context.Context, userID, projectID uint64, page, pageSize int, status string) ([]TaskResult, int64, error) {
+	items, err := s.ListTasks(ctx, userID, projectID, page, pageSize, status)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := repository.CountTasks(ctx, s.db, userID, projectID, status)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return items, total, nil
+}

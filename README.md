@@ -153,6 +153,7 @@ GET http://localhost:8080/healthz
 | GET    | `/api/v1/conversations/:id/messages` | 历史消息分页                    |
 | POST   | `/api/v1/projects/:id/tasks`         | 创建任务                        |
 | GET    | `/api/v1/projects/:id/tasks`         | 任务分页列表                    |
+| GET    | `/api/v1/tasks/:id/retrospective`    | 任务复盘：来源、证据、状态审计    |
 | PATCH  | `/api/v1/tasks/:id/status`           | 修改状态（需要 `version`）      |
 | POST   | `/api/v1/tasks/:id/evidence`         | 创建任务证据                    |
 
@@ -234,3 +235,14 @@ go test -p 1 ./... -count=1
 
 本项目目前以个人开发和工程实践为主，持续完善真实业务约束、事务一致性、并发正确性与测试覆盖。
 
+
+## v6.1 P0 业务闭环验收
+
+任务列表支持可选 `status=todo|doing|done`，返回 `items/page/page_size/total`。
+默认 page=1、page_size=20，范围为 page>=1、1<=page_size<=100，非法参数返回 400，保留 OFFSET 溢出保护。
+Count 与 List 共用用户、项目和状态条件，按 `created_at DESC, id DESC` 稳定排序；两条 SQL 在并发写入下不保证同一快照。
+
+`GET /api/v1/tasks/:id/retrospective` 需要 JWT，返回任务、来源消息、证据和状态审计；其他用户或不存在的任务均返回 404。
+该接口提供 PRD 所需的事实复盘，不产生 task_reviews 评审决策。
+
+实际测试、事务故障注入、HTTP 运行记录以及一键复现脚本见 [业务闭环证据](docs/evidence/business-flow/README.md)。

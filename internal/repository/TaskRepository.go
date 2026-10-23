@@ -76,17 +76,7 @@ func ListTasks(
 
 	// 3. 用户与项目隔离、确定性排序、分页
 	// 1. 限定用户和项目
-	query := db.WithContext(ctx).
-		Model(&model.Task{}).
-		Where(
-			"tasks.user_id = ? AND tasks.project_id = ?",
-			userID, projectID,
-		)
-
-	// 2. 可选的状态过滤
-	if status != "" {
-		query = query.Where("tasks.status = ?", status)
-	}
+	query := taskFilter(ctx, db, userID, projectID, status)
 
 	// 3. 稳定排序 + 分页
 	result := query.
@@ -126,4 +116,18 @@ func UpdateTaskStatusCAS(
 		return 0, err
 	}
 	return result.RowsAffected, nil
+}
+
+// taskFilter keeps Count and List ownership and status predicates identical.
+func taskFilter(ctx context.Context, db *gorm.DB, userID, projectID uint64, status string) *gorm.DB {
+	query := db.WithContext(ctx).Model(&model.Task{}).Where("tasks.user_id = ? AND tasks.project_id = ?", userID, projectID)
+	if status != "" {
+		query = query.Where("tasks.status = ?", status)
+	}
+	return query
+}
+func CountTasks(ctx context.Context, db *gorm.DB, userID, projectID uint64, status string) (int64, error) {
+	var count int64
+	err := taskFilter(ctx, db, userID, projectID, status).Count(&count).Error
+	return count, databaseError(ctx, "count tasks", err)
 }

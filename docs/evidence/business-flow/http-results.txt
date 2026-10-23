@@ -1,0 +1,65 @@
+GET /healthz => 200
+response: {"code": 0, "message": "ok", "data": {"status": "ok"}}
+POST /api/v1/auth/register => 201
+request: {"username": "p0_c9af4b97b753418ca8f0", "email": "p0_c9af4b97b753418ca8f0@example.com", "password": "<REDACTED>"}
+response: {"code": "SUCCESS", "data": {"id": 752, "username": "p0_c9af4b97b753418ca8f0", "email": "p0_c9af4b97b753418ca8f0@example.com"}}
+POST /api/v1/auth/login => 200
+request: {"email": "p0_c9af4b97b753418ca8f0@example.com", "password": "<REDACTED>"}
+response: {"code": "SUCCESS", "data": {"access_token": "<REDACTED>", "token_type": "Bearer", "expires_in": 3600}}
+POST /api/v1/projects => 201
+request: {"name": "P0 business flow 3af825a6"}
+response: {"code": "SUCCESS", "data": {"id": 318, "name": "P0 business flow 3af825a6", "description": null, "status": "active", "created_at": "0001-01-01T00:00:00Z", "updated_at": "0001-01-01T00:00:00Z"}}
+POST /api/v1/conversations => 201
+request: {"title": "Transaction practice", "project_id": 318}
+response: {"code": "SUCCESS", "data": {"id": 280, "title": "Transaction practice", "project_id": 318}}
+POST /api/v1/conversations/280/messages => 201
+request: {"content": "Verify atomic task status and audit updates"}
+response: {"code": "SUCCESS", "data": {"id": 227, "conversation_id": 280, "role": "user", "content": "Verify atomic task status and audit updates", "created_at": "2026-10-23T10:17:34.011+08:00"}}
+POST /api/v1/projects/318/tasks => 201
+request: {"title": "Practice transaction rollback", "source_message_id": 227}
+response: {"code": "SUCCESS", "data": {"id": 171, "project_id": 318, "source_message_id": 227, "title": "Practice transaction rollback", "description": null, "status": "todo", "version": 1, "completed_at": null, "created_at": "2026-10-23T10:17:34.026+08:00", "updated_at": "2026-10-23T10:17:34.026+08:00"}}
+PATCH /api/v1/tasks/171/status => 409
+request: {"status": "done", "version": 1}
+response: {"code": "INVALID_STATE_TRANSITION", "message": "不允许的任务状态转换"}
+PATCH /api/v1/tasks/171/status => 204
+request: {"status": "doing", "version": 1}
+response: null
+GET /api/v1/projects/318/tasks?status=doing => 200
+response: {"code": "SUCCESS", "data": {"items": [{"id": 171, "project_id": 318, "source_message_id": 227, "title": "Practice transaction rollback", "description": null, "status": "doing", "version": 2, "completed_at": null, "created_at": "2026-10-23T10:17:34.026+08:00", "updated_at": "2026-10-23T10:17:34.043+08:00"}], "page": 1, "page_size": 20, "total": 1}}
+PATCH /api/v1/tasks/171/status => 409
+request: {"status": "done", "version": 2}
+response: {"code": "EVIDENCE_REQUIRED", "message": "任务完成前必须提交至少一条有效证据"}
+POST /api/v1/tasks/171/evidence => 201
+request: {"type": "test_output", "text": "Draft observation", "status": "draft"}
+response: {"code": "SUCCESS", "data": {"id": 1, "task_id": 171, "type": "test_output", "text": "Draft observation", "commit_sha": null, "status": "draft", "created_at": "2026-10-23T10:17:34.093+08:00"}}
+PATCH /api/v1/tasks/171/status => 409
+request: {"status": "done", "version": 2}
+response: {"code": "EVIDENCE_REQUIRED", "message": "任务完成前必须提交至少一条有效证据"}
+POST /api/v1/tasks/171/evidence => 201
+request: {"type": "experiment_text", "text": "Observed HTTP: todo to done rejected; doing without submitted evidence rejected, including draft-only evidence.", "status": "submitted"}
+response: {"code": "SUCCESS", "data": {"id": 2, "task_id": 171, "type": "experiment_text", "text": "Observed HTTP: todo to done rejected; doing without submitted evidence rejected, including draft-only evidence.", "commit_sha": null, "status": "submitted", "created_at": "2026-10-23T10:17:34.105+08:00"}}
+PATCH /api/v1/tasks/171/status => 409
+request: {"status": "done", "version": 1}
+response: {"code": "VERSION_CONFLICT", "message": "任务版本已发生变化"}
+PATCH /api/v1/tasks/171/status => 204
+request: {"status": "done", "version": 2}
+response: null
+GET /api/v1/projects/318/tasks?page=1&page_size=20&status=done => 200
+response: {"code": "SUCCESS", "data": {"items": [{"id": 171, "project_id": 318, "source_message_id": 227, "title": "Practice transaction rollback", "description": null, "status": "done", "version": 3, "completed_at": "2026-10-23T10:17:34.119+08:00", "created_at": "2026-10-23T10:17:34.026+08:00", "updated_at": "2026-10-23T10:17:34.12+08:00"}], "page": 1, "page_size": 20, "total": 1}}
+GET /api/v1/projects/318/tasks?page=2&page_size=20&status=done => 200
+response: {"code": "SUCCESS", "data": {"items": [], "page": 2, "page_size": 20, "total": 1}}
+GET /api/v1/projects/318/tasks?status=invalid => 400
+response: {"code": "INVALID_ARGUMENT", "message": "无效的 status 参数"}
+GET /api/v1/tasks/171/retrospective => 200
+response: {"code": "SUCCESS", "data": {"task": {"id": 171, "project_id": 318, "source_message_id": 227, "title": "Practice transaction rollback", "description": null, "status": "done", "version": 3, "completed_at": "2026-10-23T10:17:34.119+08:00", "created_at": "2026-10-23T10:17:34.026+08:00", "updated_at": "2026-10-23T10:17:34.12+08:00"}, "source": {"id": 227, "conversation_id": 280, "role": "user", "content": "Verify atomic task status and audit updates", "created_at": "2026-10-23T10:17:34.011+08:00"}, "evidence": [{"id": 1, "task_id": 171, "type": "test_output", "text": "Draft observation", "commit_sha": null, "status": "draft", "created_at": "2026-10-23T10:17:34.093+08:00"}, {"id": 2, "task_id": 171, "type": "experiment_text", "text": "Observed HTTP: todo to done rejected; doing without submitted evidence rejected, including draft-only evidence.", "commit_sha": null, "status": "submitted", "created_at": "2026-10-23T10:17:34.105+08:00"}], "audits": [{"id": 1, "from_status": "todo", "to_status": "doing", "from_version": 1, "to_version": 2, "created_at": "2026-10-23T10:17:34.045+08:00"}, {"id": 2, "from_status": "doing", "to_status": "done", "from_version": 2, "to_version": 3, "created_at": "2026-10-23T10:17:34.122+08:00"}]}}
+POST /api/v1/auth/register => 201
+request: {"username": "p0_f9f416f4543a46c5b2a9", "email": "p0_f9f416f4543a46c5b2a9@example.com", "password": "<REDACTED>"}
+response: {"code": "SUCCESS", "data": {"id": 753, "username": "p0_f9f416f4543a46c5b2a9", "email": "p0_f9f416f4543a46c5b2a9@example.com"}}
+POST /api/v1/auth/login => 200
+request: {"email": "p0_f9f416f4543a46c5b2a9@example.com", "password": "<REDACTED>"}
+response: {"code": "SUCCESS", "data": {"access_token": "<REDACTED>", "token_type": "Bearer", "expires_in": 3600}}
+GET /api/v1/tasks/171/retrospective => 404
+response: {"code": "NOT_FOUND", "message": "任务或所属项目不存在"}
+GET /api/v1/projects/318/tasks => 404
+response: {"code": "NOT_FOUND", "message": "项目不存在"}
+PASS: persisted project=318 conversation=280 message=227 task=171; JWT and passwords redacted

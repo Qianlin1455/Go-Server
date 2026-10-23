@@ -1,0 +1,78 @@
+COMMAND: go test -p 1 ./internal/repository ./internal/service ./internal/handler -count=1
+ok  	GoServer/internal/repository	1.473s
+ok  	GoServer/internal/service	2.468s
+ok  	GoServer/internal/handler	2.034s
+COMMAND: go test -p 1 ./... -count=1
+?   	GoServer/cmd/poolbaseline	[no test files]
+?   	GoServer/cmd/server	[no test files]
+ok  	GoServer/internal/database	0.855s
+ok  	GoServer/internal/handler	2.012s
+ok  	GoServer/internal/midware	3.923s
+?   	GoServer/internal/model	[no test files]
+ok  	GoServer/internal/repository	1.803s
+?   	GoServer/internal/response	[no test files]
+ok  	GoServer/internal/security	0.846s
+ok  	GoServer/internal/service	2.128s
+Final verification after adding empty recap and source isolation assertions:
+ok  	GoServer/internal/repository	1.454s
+ok  	GoServer/internal/service	2.407s
+ok  	GoServer/internal/handler	2.117s
+?   	GoServer/cmd/poolbaseline	[no test files]
+?   	GoServer/cmd/server	[no test files]
+ok  	GoServer/internal/database	0.882s
+ok  	GoServer/internal/handler	2.324s
+ok  	GoServer/internal/midware	3.947s
+?   	GoServer/internal/model	[no test files]
+ok  	GoServer/internal/repository	1.528s
+?   	GoServer/internal/response	[no test files]
+ok  	GoServer/internal/security	0.801s
+ok  	GoServer/internal/service	2.465s
+=== RUN   TestChangeStatus_DoneRollbackWhenAuditFails
+
+2026/10/23 10:20:20 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/TaskStatusAuditRepository.go:20 [35;1mduplicated key not allowed
+[0m[33m[1.036ms] [34;1m[rows:0][0m INSERT INTO `task_status_audits` (`task_id`,`actor_user_id`,`from_status`,`to_status`,`from_version`,`to_version`,`created_at`) VALUES (936,1449,'doing','done',2,3,'2026-10-23 10:20:20.138')
+    task_service_test.go:572: verified after unique audit INSERT failure: status=doing version=2 completed_at=<nil> audit_count=2 (unchanged)
+--- PASS: TestChangeStatus_DoneRollbackWhenAuditFails (0.09s)
+PASS
+ok  	GoServer/internal/service	1.119s
+COMMAND: go test -p 1 ./internal/handler -run ^TestTaskP0ListAndRetrospective$ -count=1 -v
+=== RUN   TestTaskP0ListAndRetrospective
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] POST   /api/v1/projects/:id/tasks --> GoServer/internal/handler.(*TaskHandler).CreateTask-fm (2 handlers)
+[GIN-debug] GET    /api/v1/projects/:id/tasks --> GoServer/internal/handler.(*TaskHandler).ListTasks-fm (2 handlers)
+[GIN-debug] GET    /api/v1/tasks/:id/retrospective --> GoServer/internal/handler.(*TaskHandler).Retrospective-fm (2 handlers)
+[GIN-debug] PATCH  /api/v1/tasks/:id/status  --> GoServer/internal/handler.(*TaskHandler).ChangeStatus-fm (2 handlers)
+[GIN-debug] POST   /api/v1/tasks/:id/evidence --> GoServer/internal/handler.(*EvidenceHandler).CreateEvidence-fm (2 handlers)
+=== RUN   TestTaskP0ListAndRetrospective/#00
+=== RUN   TestTaskP0ListAndRetrospective/?status=todo
+=== RUN   TestTaskP0ListAndRetrospective/?status=done
+=== RUN   TestTaskP0ListAndRetrospective/?status=doing&page_size=1
+=== RUN   TestTaskP0ListAndRetrospective/?status=doing&page_size=1&page=2
+=== RUN   TestTaskP0ListAndRetrospective/?status=doing&page_size=1&page=3
+
+2026/10/23 10:20:23 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/ProjectRepository.go:22 [35;1mrecord not found
+[0m[33m[0.514ms] [34;1m[rows:0][0m SELECT * FROM `projects` WHERE id = 2194 AND user_id = 1450 ORDER BY `projects`.`id` LIMIT 1
+
+2026/10/23 10:20:23 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/task_retrospective.go:33 [35;1mrecord not found
+[0m[33m[1.032ms] [34;1m[rows:0][0m SELECT messages.* FROM `messages` JOIN conversations ON conversations.id = messages.conversation_id WHERE messages.id = 494 AND conversations.user_id = 1451 AND conversations.project_id = 2191 ORDER BY `messages`.`id` LIMIT 1
+
+2026/10/23 10:20:23 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/task_retrospective.go:33 [35;1mrecord not found
+[0m[33m[1.039ms] [34;1m[rows:0][0m SELECT messages.* FROM `messages` JOIN conversations ON conversations.id = messages.conversation_id WHERE messages.id = 494 AND conversations.user_id = 1450 AND conversations.project_id = 2193 ORDER BY `messages`.`id` LIMIT 1
+
+2026/10/23 10:20:23 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/TaskRepository.go:15 [35;1mrecord not found
+[0m[33m[1.324ms] [34;1m[rows:0][0m SELECT * FROM `tasks` WHERE id = 943 AND user_id = 1451 ORDER BY `tasks`.`id` LIMIT 1
+
+2026/10/23 10:20:23 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/TaskRepository.go:131 [35;1mcontext canceled
+[0m[33m[0.000ms] [34;1m[rows:0][0m SELECT count(*) FROM `tasks` WHERE tasks.user_id = 1450 AND tasks.project_id = 2191
+--- PASS: TestTaskP0ListAndRetrospective (0.21s)
+    --- PASS: TestTaskP0ListAndRetrospective/#00 (0.02s)
+    --- PASS: TestTaskP0ListAndRetrospective/?status=todo (0.00s)
+    --- PASS: TestTaskP0ListAndRetrospective/?status=done (0.00s)
+    --- PASS: TestTaskP0ListAndRetrospective/?status=doing&page_size=1 (0.00s)
+    --- PASS: TestTaskP0ListAndRetrospective/?status=doing&page_size=1&page=2 (0.00s)
+    --- PASS: TestTaskP0ListAndRetrospective/?status=doing&page_size=1&page=3 (0.00s)
+PASS
+ok  	GoServer/internal/handler	1.716s

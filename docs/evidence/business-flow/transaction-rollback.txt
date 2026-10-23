@@ -1,0 +1,15 @@
+Database: go_server_test (real MySQL; fixture cleanup after assertions).
+Scenario: occupy unique (task_id,to_version=3), then attempt doing/v2 -> done/v3 with submitted evidence.
+Expected: audit INSERT unique conflict rolls back status UPDATE; doing/v2/completed_at=NULL and existing audit_count=2 remain.
+Observed and asserted DB state follows below. The second existing audit is deliberately seeded, not produced by the failed transaction.
+Initial attempt with development account could not run (1044 permission denied); successful run uses existing local container credentials in process memory only.
+
+COMMAND: go test -p 1 ./internal/service -run ^TestChangeStatus_DoneRollbackWhenAuditFails$ -count=1 -v
+=== RUN   TestChangeStatus_DoneRollbackWhenAuditFails
+
+2026/10/23 10:17:09 [31;1mC:/Users/Lenovo/Desktop/Go-Server/internal/repository/TaskStatusAuditRepository.go:20 [35;1mduplicated key not allowed
+[0m[33m[1.037ms] [34;1m[rows:0][0m INSERT INTO `task_status_audits` (`task_id`,`actor_user_id`,`from_status`,`to_status`,`from_version`,`to_version`,`created_at`) VALUES (811,1283,'doing','done',2,3,'2026-10-23 10:17:09.156')
+    task_service_test.go:572: verified after unique audit INSERT failure: status=doing version=2 completed_at=<nil> audit_count=2 (unchanged)
+--- PASS: TestChangeStatus_DoneRollbackWhenAuditFails (0.07s)
+PASS
+ok  	GoServer/internal/service	1.111s

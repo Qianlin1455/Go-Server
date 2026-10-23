@@ -194,7 +194,7 @@ func (h *TaskHandler) ListTasks(c *gin.Context) {
 	}
 
 	// 6. 调用 Service
-	tasks, err := h.svc.ListTasks(
+	tasks, total, err := h.svc.ListTasksPage(
 		c.Request.Context(),
 		userID,
 		projectID,
@@ -213,6 +213,7 @@ func (h *TaskHandler) ListTasks(c *gin.Context) {
 		"code": "SUCCESS",
 		"data": gin.H{
 			"items":     tasks,
+			"total":     total,
 			"page":      page,
 			"page_size": pageSize,
 		},
@@ -267,4 +268,21 @@ func (h *TaskHandler) ChangeStatus(c *gin.Context) {
 	// 当前 ChangeStatus 只返回 error，
 	// 因此采用 HTTP 204，无响应正文
 	c.Status(http.StatusNoContent)
+}
+
+func (h *TaskHandler) Retrospective(c *gin.Context) {
+	userID, ok := taskUserID(c)
+	if !ok {
+		return
+	}
+	taskID, ok := parseTaskPathID(c, "id")
+	if !ok {
+		return
+	}
+	result, err := h.svc.Retrospective(c.Request.Context(), userID, taskID)
+	if err != nil {
+		WriteServiceerror(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": "SUCCESS", "data": result})
 }
