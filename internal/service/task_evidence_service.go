@@ -14,7 +14,6 @@ import (
 	"GoServer/internal/repository"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var (
@@ -170,46 +169,25 @@ func (s *EvidenceService) CreateEvidence(
 	var created *model.TaskEvidence
 
 	// 3. 开启事务
-	err := s.db.WithContext(ctx).Transaction(
+	err := repository.Transaction(ctx, s.db,
 		func(tx *gorm.DB) error {
 
 			// 4. 校验 Task 归属
-			var task model.Task
-
-			err := tx.
-				Where(
-					"id = ? AND user_id = ?",
-					taskID,
-					userID,
-				).
-				First(&task).Error
-
+			task, err := repository.GetTaskByUserID(ctx, tx, userID, taskID)
 			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
+				if errors.Is(err, repository.ErrNotFound) {
 					return ErrTaskNotFound
 				}
-				return fmt.Errorf("query task: %w", err)
+				return err
 			}
 
 			// 5. 锁定并检查所属 Project
-			var project model.Project
-
-			err = tx.
-				Clauses(clause.Locking{
-					Strength: "UPDATE",
-				}).
-				Where(
-					"id = ? AND user_id = ?",
-					task.ProjectID,
-					userID,
-				).
-				First(&project).Error
-
+			project, err := repository.GetProjectForUpdate(ctx, tx, userID, task.ProjectID)
 			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
+				if errors.Is(err, repository.ErrNotFound) {
 					return ErrTaskNotFound
 				}
-				return fmt.Errorf("query project: %w", err)
+				return err
 			}
 
 			// 6. 归档项目禁止提交证据
