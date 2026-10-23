@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -26,10 +24,7 @@ func GetConversationOwnerID(
 		Take(&row).Error
 
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, ErrNotFound
-		}
-		return 0, fmt.Errorf("query conversation owner: %w", err)
+		return 0, databaseError(ctx, "query conversation owner", err)
 	}
 
 	return row.UserID, nil
@@ -53,14 +48,7 @@ func GetConversationOwnerForUpdate(
 		Take(&row).Error
 
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, ErrNotFound
-		}
-
-		return 0, fmt.Errorf(
-			"get conversation owner for update: %w",
-			err,
-		)
+		return 0, databaseError(ctx, "get conversation owner for update", err)
 	}
 
 	return row.UserID, nil

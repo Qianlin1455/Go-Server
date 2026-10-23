@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"GoServer/internal/response"
 	"GoServer/internal/service"
 	"context"
 	"errors"
@@ -10,13 +11,29 @@ import (
 )
 
 func WriteServiceerror(c *gin.Context, err error) {
+	// Keep a committed response intact, but retain the error for server logging.
+	if c.Writer.Written() {
+		_ = c.Error(err)
+		c.Abort()
+		return
+	}
+
 	var status int
 	var code, message string
+	deadlineExceeded := errors.Is(err, context.DeadlineExceeded)
+	if c.Request != nil {
+		deadlineExceeded = deadlineExceeded || errors.Is(c.Request.Context().Err(), context.DeadlineExceeded)
+	}
 
 	switch {
+	case deadlineExceeded:
+		response.DeadlineExceeded(c, err)
+		return
+
 	case errors.Is(err, service.ErrInvalidMessageInput),
 		errors.Is(err, service.ErrInvalidRegisterInput),
-		errors.Is(err, service.ErrInvalidPagination):
+		errors.Is(err, service.ErrInvalidPagination),
+		errors.Is(err, service.ErrInvalidProjectInput):
 		status = http.StatusBadRequest
 		code = "INVALID_ARGUMENT"
 		message = "请求参数不合法"
@@ -40,17 +57,6 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusNotFound
 		code = "NOT_FOUND"
 		message = "会话不存在"
-	case errors.Is(err, context.DeadlineExceeded):
-		status = http.StatusGatewayTimeout
-		code = "DEADLINE_EXCEEDED"
-		message = "请求处理超时"
-	case errors.Is(err, service.ErrInvalidMessageInput),
-		errors.Is(err, service.ErrInvalidRegisterInput),
-		errors.Is(err, service.ErrInvalidPagination),
-		errors.Is(err, service.ErrInvalidProjectInput):
-		status = http.StatusBadRequest
-		code = "INVALID_ARGUMENT"
-		message = "请求参数不合法"
 	case errors.Is(err, service.ErrProjectAlreadyExists):
 		status = http.StatusConflict
 		code = "PROJECT_ALREADY_EXISTS"
@@ -114,7 +120,7 @@ func WriteServiceerror(c *gin.Context, err error) {
 		message = "服务器内部错误"
 	}
 
-	c.JSON(status, gin.H{
+	c.AbortWithStatusJSON(status, gin.H{
 		"code":    code,
 		"message": message,
 	})

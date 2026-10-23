@@ -3,12 +3,21 @@ package repository
 import (
 	"GoServer/internal/model"
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// GetTaskByUserID is used when the API supplies only a task ID. Ownership stays
+// in the query so another user's task is indistinguishable from a missing task.
+func GetTaskByUserID(ctx context.Context, db *gorm.DB, userID, taskID uint64) (*model.Task, error) {
+	var task model.Task
+	err := db.WithContext(ctx).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error
+	if err != nil {
+		return nil, databaseError(ctx, "get task by user", err)
+	}
+	return &task, nil
+}
 
 func CreateTask(
 	ctx context.Context,
@@ -17,29 +26,7 @@ func CreateTask(
 ) error {
 	// 1. 执行 INSERT
 	result := db.WithContext(ctx).Create(task)
-
-	if result.Error == nil {
-		return nil
-	}
-
-	// 2. Context 取消或超时
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// 3. 外键约束冲突
-	if errors.Is(result.Error, gorm.ErrForeignKeyViolated) {
-		return fmt.Errorf(
-			"create task: %w",
-			errors.Join(ErrInvalidReference, result.Error),
-		)
-	}
-
-	// 4. 其他数据库错误
-	return fmt.Errorf(
-		"create task: %w",
-		errors.Join(ErrStorage, result.Error),
-	)
+	return databaseError(ctx, "create task", result.Error)
 }
 
 func GetTaskByID(
@@ -58,27 +45,10 @@ func GetTaskByID(
 			taskID, projectID, userID,
 		).
 		First(&task)
-
-	// 2. 查询成功
-	if result.Error == nil {
-		return &task, nil
+	if result.Error != nil {
+		return nil, databaseError(ctx, "get task", result.Error)
 	}
-
-	// 3. Context 取消或超时
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	// 4. 任务不存在或不属于当前用户/项目
-	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-
-	// 5. 其他数据库错误
-	return nil, fmt.Errorf(
-		"get task: %w",
-		errors.Join(ErrStorage, result.Error),
-	)
+	return &task, nil
 }
 
 func ListTasks(
@@ -114,22 +84,10 @@ func ListTasks(
 		Order("tasks.id DESC").
 		Scopes(Paginate(page, pageSize)).
 		Find(&tasks)
-
-	// 4. 查询成功
-	if result.Error == nil {
-		return tasks, nil
+	if result.Error != nil {
+		return nil, databaseError(ctx, "list tasks", result.Error)
 	}
-
-	// 5. Context 取消或超时
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	// 6. 其他数据库错误
-	return nil, fmt.Errorf(
-		"list tasks: %w",
-		errors.Join(ErrStorage, result.Error),
-	)
+	return tasks, nil
 }
 
 func UpdateTaskStatusCAS(
@@ -154,11 +112,8 @@ func UpdateTaskStatusCAS(
 			"version":      gorm.Expr("version + 1"),
 			"completed_at": completedAt,
 		})
-	if ctx.Err() != nil {
-		return 0, ctx.Err()
-	}
-	if result.Error != nil {
-		return 0, fmt.Errorf("update task status: %w", errors.Join(ErrStorage, result.Error))
+	if err := databaseError(ctx, "update task status", result.Error); err != nil {
+		return 0, err
 	}
 	return result.RowsAffected, nil
 }

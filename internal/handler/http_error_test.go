@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"GoServer/internal/repository"
 	"GoServer/internal/service"
@@ -30,6 +33,12 @@ func TestWriteServiceError(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "INVALID_ARGUMENT",
 		},
+		{name: "invalid register", err: service.ErrInvalidRegisterInput, wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT"},
+		{name: "invalid pagination", err: service.ErrInvalidPagination, wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT"},
+		{name: "invalid project", err: service.ErrInvalidProjectInput, wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT"},
+		{name: "wrapped deadline", err: fmt.Errorf("storage: %w", errors.Join(repository.ErrStorage, context.DeadlineExceeded)), wantStatus: http.StatusGatewayTimeout, wantCode: "DEADLINE_EXCEEDED"},
+		{name: "deadline takes precedence", err: errors.Join(service.ErrInvalidMessageInput, context.DeadlineExceeded), wantStatus: http.StatusGatewayTimeout, wantCode: "DEADLINE_EXCEEDED"},
+		{name: "private database cause", err: errors.Join(repository.ErrStorage, errors.New("database failed: password=secret SELECT * FROM users")), wantStatus: http.StatusInternalServerError, wantCode: "INTERNAL_ERROR"},
 		{
 			name:       "invalid credentials",
 			err:        service.ErrInvalidCredentials,
@@ -116,15 +125,39 @@ func TestWriteServiceError(t *testing.T) {
 
 			// 6. 服务器错误不能泄露内部信息
 			if tt.wantStatus == http.StatusInternalServerError {
-				if strings.Contains(
-					w.Body.String(), "database failed",
-				) {
+				if strings.Contains(w.Body.String(), "database failed") || strings.Contains(w.Body.String(), "secret") {
 					t.Error("internal error leaked")
+				}
+				if len(c.Errors) != 1 || !errors.Is(c.Errors[0].Err, tt.err) {
+					t.Fatal("internal error cause was not retained")
 				}
 			}
 		})
 	}
 
-	// 避免未使用 errors 导入，同时验证非哨兵错误也能映射为 500
-	_ = errors.New
+}
+
+func TestWriteServiceErrorDeadlineFromRequest(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	WriteServiceerror(c, sql.ErrTxDone)
+	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "DEADLINE_EXCEEDED") {
+		t.Fatalf("response = %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWriteServiceErrorPreservesCommittedResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.String(http.StatusAccepted, "already sent")
+	WriteServiceerror(c, context.DeadlineExceeded)
+	if w.Code != http.StatusAccepted || w.Body.String() != "already sent" {
+		t.Fatalf("committed response changed: %d %s", w.Code, w.Body.String())
+	}
+	if len(c.Errors) != 1 || !errors.Is(c.Errors[0].Err, context.DeadlineExceeded) || !c.IsAborted() {
+		t.Fatal("late error was not recorded and aborted")
+	}
 }

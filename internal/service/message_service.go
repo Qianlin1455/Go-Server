@@ -124,11 +124,7 @@ func (s *MessageService) CreateMessage(
 	}
 
 	// 重新查询数据库生成字段
-	dbMsg := &model.Message{}
-
-	err = s.db.WithContext(ctx).
-		First(dbMsg, msg.ID).
-		Error
+	dbMsg, err := repository.GetMessageByID(ctx, s.db, userID, conversationID, msg.ID)
 
 	if err != nil {
 		return nil, err
@@ -251,7 +247,7 @@ func (s *MessageService) SendMessage(
 	var message model.Message
 
 	// 2. 开启事务
-	err := s.db.WithContext(ctx).Transaction(
+	err := repository.Transaction(ctx, s.db,
 		func(tx *gorm.DB) error {
 
 			// ① 查询会话归属，并锁定会话行

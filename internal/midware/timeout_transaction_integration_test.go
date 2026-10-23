@@ -2,12 +2,14 @@ package midware_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"GoServer/internal/database"
+	"GoServer/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -34,6 +36,9 @@ func TestTimeoutRollsBackTransaction(t *testing.T) {
 		Row().Scan(&dbName); err != nil {
 		t.Fatal(err)
 	}
+	if dbName != "go_server_test" {
+		t.Fatalf("拒绝在 %q 运行事务写入测试，必须使用 go_server_test", dbName)
+	}
 
 	username := fmt.Sprintf("timeout_%d", time.Now().UnixNano())
 	email := username + "@example.test"
@@ -50,7 +55,7 @@ func TestTimeoutRollsBackTransaction(t *testing.T) {
 	inserted := false
 	start := time.Now()
 
-	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = repository.Transaction(ctx, db, func(tx *gorm.DB) error {
 		// ① 先在事务内插入用户
 		if err := tx.Exec(
 			"INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
@@ -81,6 +86,9 @@ func TestTimeoutRollsBackTransaction(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("事务意外提交成功")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("事务未传播 DeadlineExceeded: %v", err)
 	}
 	if elapsed >= 1500*time.Millisecond {
 		t.Fatalf("事务未及时返回: %s", elapsed)

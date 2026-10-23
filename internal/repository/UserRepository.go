@@ -11,52 +11,25 @@ import (
 
 func CreateUser(ctx context.Context, db *gorm.DB, u *model.Users) error {
 	result := db.WithContext(ctx).Create(u)
-	if result.Error == nil {
-		return nil
-	}
-	// 优先处理 Context 取消或超时
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	// 唯一键冲突
-	if errors.Is(result.Error, gorm.ErrDuplicatedKey) {
-		return ErrAlreadyExists
-	}
-	// 其他数据库错误
-	return fmt.Errorf("create user failed: %w", ErrStorage)
+	return databaseError(ctx, "create user", result.Error)
 }
 
 func GetUserByID(ctx context.Context, db *gorm.DB, id uint64) (*model.Users, error) {
 	user := model.Users{}
 	result := db.WithContext(ctx).First(&user, id)
-	if result.Error == nil {
-		return &user, nil
+	if result.Error != nil {
+		return nil, databaseError(ctx, "get user by id", result.Error)
 	}
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("没有找到记录:%w", ErrNotFound)
-	}
-
-	return nil, fmt.Errorf("查询失败:%w", ErrStorage)
+	return &user, nil
 }
 
 func GetUserByName(ctx context.Context, db *gorm.DB, name string) (*model.Users, error) {
 	var user model.Users
 	result := db.WithContext(ctx).Where("username = ?", name).First(&user)
-	if result.Error == nil {
-		return &user, nil
+	if result.Error != nil {
+		return nil, databaseError(ctx, "get user by name", result.Error)
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-
-	return nil, ErrStorage
+	return &user, nil
 }
 
 func GetUserByEmail(
@@ -73,14 +46,14 @@ func GetUserByEmail(
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, databaseError(ctx, "query user", err)
 		}
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrUserNotFound
+			return nil, fmt.Errorf("get user by email: %w", errors.Join(ErrUserNotFound, err))
 		}
 
-		return nil, fmt.Errorf("get user by email: %w", err)
+		return nil, databaseError(ctx, "get user by email", err)
 	}
 
 	return &user, nil
@@ -93,8 +66,5 @@ func ListUser(ctx context.Context, db *gorm.DB) ([]model.Users, error) {
 	if err == nil {
 		return users, nil
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	return nil, ErrStorage
+	return nil, databaseError(ctx, "list users", err)
 }

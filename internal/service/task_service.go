@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -94,30 +93,22 @@ func (s *TaskService) ChangeStatus(
 	default:
 		return ErrInvalidTaskInput
 	}
-	return s.db.WithContext(ctx).Transaction(
+	return repository.Transaction(ctx, s.db,
 		func(tx *gorm.DB) error {
-			var task model.Task
-			err := tx.Model(&model.Task{}).
-				Select("id", "user_id", "project_id", "status", "version", "completed_at").
-				Where("id = ? AND user_id = ?", taskID, userID).
-				First(&task).Error
+			task, err := repository.GetTaskByUserID(ctx, tx, userID, taskID)
 			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
+				if errors.Is(err, repository.ErrNotFound) {
 					return ErrTaskNotFound
 				}
-				return fmt.Errorf("query task: %w", err)
+				return err
 			}
 
-			var proj model.Project
-			err = tx.Model(&model.Project{}).
-				Select("id", "user_id", "status").
-				Where("id = ? AND user_id = ?", task.ProjectID, userID).
-				First(&proj).Error
+			proj, err := repository.GetProjectByID(ctx, tx, userID, task.ProjectID)
 			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
+				if errors.Is(err, repository.ErrNotFound) {
 					return ErrTaskNotFound
 				}
-				return fmt.Errorf("query project: %w", err)
+				return err
 			}
 			if proj.Status != model.ProjectStatusActive {
 				return ErrTaskProjectArchived
@@ -139,21 +130,9 @@ func (s *TaskService) ChangeStatus(
 			}
 			// 进入 done 前，必须至少存在一条正式提交的证据
 			if toStatus == model.TaskStatusDone {
-				var count int64
-
-				err := tx.Model(&model.TaskEvidence{}).
-					Where(
-						"task_id = ? AND status = ?",
-						task.ID,
-						model.EvidenceStatusSubmitted,
-					).
-					Count(&count).Error
-
+				count, err := repository.CountSubmittedTaskEvidence(ctx, tx, task.ID)
 				if err != nil {
-					return fmt.Errorf(
-						"count submitted evidence: %w",
-						err,
-					)
+					return err
 				}
 
 				if count == 0 {
@@ -211,32 +190,16 @@ func (s *TaskService) CreateTask(
 
 	var created *TaskResult
 
-	err := s.db.WithContext(ctx).Transaction(
+	err := repository.Transaction(ctx, s.db,
 		func(tx *gorm.DB) error {
 
 			// 2. 查询 Project，校验用户归属
-			var project model.Project
-
-			err := tx.
-				Clauses(clause.Locking{
-					Strength: "UPDATE",
-				}).
-				Where(
-					"id = ? AND user_id = ?",
-					input.ProjectID,
-					userID,
-				).
-				First(&project).Error
-
+			project, err := repository.GetProjectForUpdate(ctx, tx, userID, input.ProjectID)
 			if err != nil {
-				if errors.Is(
-					err, gorm.ErrRecordNotFound,
-				) {
+				if errors.Is(err, repository.ErrNotFound) {
 					return ErrTaskNotFound
 				}
-				return fmt.Errorf(
-					"query project: %w", err,
-				)
+				return err
 			}
 
 			// 3. 归档项目禁止创建任务
@@ -246,32 +209,11 @@ func (s *TaskService) CreateTask(
 
 			// 4. 可选：验证来源消息的归属
 			if input.SourceMessageID != nil {
-				var count int64
-
-				err := tx.Model(&model.Message{}).
-					Joins(
-						"INNER JOIN conversations "+
-							"ON conversations.id = "+
-							"messages.conversation_id",
-					).
-					Where(
-						"messages.id = ? AND "+
-							"conversations.user_id = ? AND "+
-							"conversations.project_id = ?",
-						*input.SourceMessageID,
-						userID,
-						input.ProjectID,
-					).
-					Count(&count).Error
-
+				valid, err := repository.SourceMessageBelongsToProject(ctx, tx, userID, input.ProjectID, *input.SourceMessageID)
 				if err != nil {
-					return fmt.Errorf(
-						"verify source message: %w",
-						err,
-					)
+					return err
 				}
-
-				if count != 1 {
+				if !valid {
 					return ErrTaskSourceMessageInvalid
 				}
 			}

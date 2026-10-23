@@ -2,13 +2,19 @@ package repository
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"GoServer/internal/model"
 
 	"gorm.io/gorm"
 )
+
+func CountSubmittedTaskEvidence(ctx context.Context, db *gorm.DB, taskID uint64) (int64, error) {
+	var count int64
+	err := db.WithContext(ctx).Model(&model.TaskEvidence{}).
+		Where("task_id = ? AND status = ?", taskID, model.EvidenceStatusSubmitted).
+		Count(&count).Error
+	return count, databaseError(ctx, "count submitted evidence", err)
+}
 
 func CreateTaskEvidence(
 	ctx context.Context,
@@ -25,37 +31,5 @@ func CreateTaskEvidence(
 
 	// 2. 执行 INSERT
 	result := db.WithContext(ctx).Create(evidence)
-
-	// 3. Context 取消或超时
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// 4. 插入成功
-	if result.Error == nil {
-		return nil
-	}
-
-	// 5. 外键约束失败
-	if errors.Is(
-		result.Error,
-		gorm.ErrForeignKeyViolated,
-	) {
-		return fmt.Errorf(
-			"create task evidence: %w",
-			errors.Join(
-				ErrInvalidReference,
-				result.Error,
-			),
-		)
-	}
-
-	// 6. 其他数据库错误
-	return fmt.Errorf(
-		"create task evidence: %w",
-		errors.Join(
-			ErrStorage,
-			result.Error,
-		),
-	)
+	return databaseError(ctx, "create task evidence", result.Error)
 }
