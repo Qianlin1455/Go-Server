@@ -127,7 +127,7 @@ func TestListTasks_Integration(t *testing.T) {
 	}
 	for _, tc := range pagination {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := svc.ListTasks(ctx, userA.ID, projectA.ID, tc.page, tc.size)
+			got, err := svc.ListTasks(ctx, userA.ID, projectA.ID, tc.page, tc.size, "")
 			if err != nil {
 				t.Fatalf("ListTasks 失败: %v", err)
 			}
@@ -149,28 +149,28 @@ func TestListTasks_Integration(t *testing.T) {
 	}
 
 	t.Run("空项目返回非nil空列表", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userA.ID, emptyProject.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userA.ID, emptyProject.ID, 1, 20, "")
 		if err != nil || got == nil || len(got) != 0 {
 			t.Fatalf("期望非nil空列表: got=%+v err=%v", got, err)
 		}
 	})
 
 	t.Run("同用户不同项目隔离", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userA.ID, projectA2.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userA.ID, projectA2.ID, 1, 20, "")
 		if err != nil || len(got) != 1 || got[0].ID != taskA2.ID {
 			t.Fatalf("同用户项目隔离失败: got=%+v err=%v", got, err)
 		}
 	})
 
 	t.Run("另一个用户查询自己项目", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userB.ID, projectB.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userB.ID, projectB.ID, 1, 20, "")
 		if err != nil || len(got) != 1 || got[0].ID != taskB.ID {
 			t.Fatalf("用户B查询失败: got=%+v err=%v", got, err)
 		}
 	})
 
 	t.Run("归档项目仍允许查询", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userA.ID, archivedProject.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userA.ID, archivedProject.ID, 1, 20, "")
 		if err != nil || len(got) != 1 || got[0].ID != archivedTask.ID {
 			t.Fatalf("归档项目应该可读: got=%+v err=%v", got, err)
 		}
@@ -186,14 +186,14 @@ func TestListTasks_Integration(t *testing.T) {
 	}
 
 	t.Run("项目不存在", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userA.ID, ghostProject.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userA.ID, ghostProject.ID, 1, 20, "")
 		if !errors.Is(err, ErrProjectNotFound) || got != nil {
 			t.Fatalf("期望 ErrProjectNotFound: got=%+v err=%v", got, err)
 		}
 	})
 
 	t.Run("跨用户项目拒绝访问", func(t *testing.T) {
-		got, err := svc.ListTasks(ctx, userA.ID, projectB.ID, 1, 20)
+		got, err := svc.ListTasks(ctx, userA.ID, projectB.ID, 1, 20, "")
 		if !errors.Is(err, ErrProjectNotFound) || got != nil {
 			t.Fatalf("期望 ErrProjectNotFound: got=%+v err=%v", got, err)
 		}
@@ -218,7 +218,7 @@ func TestListTasks_Integration(t *testing.T) {
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := svc.ListTasks(ctx, tc.userID, tc.projectID, tc.page, tc.size)
+			got, err := svc.ListTasks(ctx, tc.userID, tc.projectID, tc.page, tc.size, "")
 			if !errors.Is(err, tc.want) || got != nil {
 				t.Fatalf("期望 %v: got=%+v err=%v", tc.want, got, err)
 			}

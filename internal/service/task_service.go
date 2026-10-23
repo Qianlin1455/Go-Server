@@ -265,13 +265,20 @@ func (s *TaskService) ListTasks(
 	projectID uint64,
 	page int,
 	pageSize int,
+	status string,
 ) ([]TaskResult, error) {
 
 	// 1. 基础参数校验
 	if userID == 0 || projectID == 0 {
 		return nil, ErrInvalidTaskInput
 	}
-
+	// 校验任务状态过滤条件
+	switch status {
+	case "", "todo", "doing", "done":
+		// 合法
+	default:
+		return nil, ErrInvalidTaskInput
+	}
 	// 2. 分页参数校验
 	if page < 1 || pageSize < 1 || pageSize > 100 {
 		return nil, ErrInvalidPagination
@@ -312,6 +319,7 @@ func (s *TaskService) ListTasks(
 		projectID,
 		page,
 		pageSize,
+		status,
 	)
 
 	if err != nil {

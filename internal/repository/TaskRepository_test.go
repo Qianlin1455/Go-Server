@@ -466,7 +466,7 @@ func TestListTasks(t *testing.T) {
 			got, err := ListTasks(
 				ctx, tx,
 				userA.ID, projectA.ID,
-				tc.page, tc.size,
+				tc.page, tc.size, "",
 			)
 
 			if err != nil {
@@ -503,11 +503,53 @@ func TestListTasks(t *testing.T) {
 		})
 	}
 
+	// 将 task2 修改为 doing，其他任务保持 todo
+	err := tx.Model(&model.Task{}).
+		Where("id = ?", task2.ID).
+		Update("status", model.TaskStatusDoing).Error
+
+	if err != nil {
+		t.Fatalf("准备测试状态失败: %v", err)
+	}
+
+	t.Run("按doing状态过滤", func(t *testing.T) {
+		got, err := ListTasks(
+			ctx,
+			tx,
+			userA.ID,
+			projectA.ID,
+			1,
+			10,
+			"doing",
+		)
+
+		if err != nil {
+			t.Fatalf("查询失败: %v", err)
+		}
+
+		// 只能返回 task2
+		if len(got) != 1 {
+			t.Fatalf("期望1条任务，实际%d条", len(got))
+		}
+
+		if got[0].ID != task2.ID {
+			t.Fatalf(
+				"状态过滤错误: want=%d, got=%d",
+				task2.ID,
+				got[0].ID,
+			)
+		}
+
+		if got[0].Status != model.TaskStatusDoing {
+			t.Fatalf("返回了错误状态: %s", got[0].Status)
+		}
+	})
+
 	// 5. 同一用户不同项目隔离
 	t.Run("同用户不同项目隔离", func(t *testing.T) {
 		got, err := ListTasks(
 			ctx, tx,
-			userA.ID, projectA2.ID, 1, 10,
+			userA.ID, projectA2.ID, 1, 10, "",
 		)
 
 		if err != nil {
@@ -523,7 +565,7 @@ func TestListTasks(t *testing.T) {
 	t.Run("跨用户查询", func(t *testing.T) {
 		got, err := ListTasks(
 			ctx, tx,
-			userA.ID, projectB.ID, 1, 10,
+			userA.ID, projectB.ID, 1, 10, "",
 		)
 
 		if err != nil {
@@ -539,7 +581,7 @@ func TestListTasks(t *testing.T) {
 	t.Run("用户B正常查询", func(t *testing.T) {
 		got, err := ListTasks(
 			ctx, tx,
-			userB.ID, projectB.ID, 1, 10,
+			userB.ID, projectB.ID, 1, 10, "",
 		)
 
 		if err != nil {
@@ -555,7 +597,7 @@ func TestListTasks(t *testing.T) {
 	t.Run("空项目", func(t *testing.T) {
 		got, err := ListTasks(
 			ctx, tx,
-			userA.ID, emptyProject.ID, 1, 10,
+			userA.ID, emptyProject.ID, 1, 10, "",
 		)
 
 		if err != nil {
@@ -592,7 +634,7 @@ func TestListTasks(t *testing.T) {
 			got, err := ListTasks(
 				ctx, tx,
 				userA.ID, projectA.ID,
-				tc.page, tc.size,
+				tc.page, tc.size, "",
 			)
 
 			if !errors.Is(err, ErrInvalidPagination) {

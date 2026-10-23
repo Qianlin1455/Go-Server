@@ -44,6 +44,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer sqlDB.Close()
+	var dbName string
+
+	err = sqlDB.QueryRow("SELECT DATABASE()").Scan(&dbName)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Current Database:", dbName)
 
 	fmt.Println("DB pool baseline: 100 requests per scenario, SELECT SLEEP(0.02)")
 	fmt.Println("Run against a LOCAL TEST database, not production.")

@@ -58,6 +58,7 @@ func ListTasks(
 	projectID uint64,
 	page int,
 	pageSize int,
+	status string,
 ) ([]model.Task, error) {
 	tasks := make([]model.Task, 0)
 
@@ -74,12 +75,21 @@ func ListTasks(
 	}
 
 	// 3. 用户与项目隔离、确定性排序、分页
-	result := db.WithContext(ctx).
+	// 1. 限定用户和项目
+	query := db.WithContext(ctx).
 		Model(&model.Task{}).
 		Where(
 			"tasks.user_id = ? AND tasks.project_id = ?",
 			userID, projectID,
-		).
+		)
+
+	// 2. 可选的状态过滤
+	if status != "" {
+		query = query.Where("tasks.status = ?", status)
+	}
+
+	// 3. 稳定排序 + 分页
+	result := query.
 		Order("tasks.created_at DESC").
 		Order("tasks.id DESC").
 		Scopes(Paginate(page, pageSize)).

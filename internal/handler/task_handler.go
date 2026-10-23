@@ -140,6 +140,20 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 // ================================
 
 func (h *TaskHandler) ListTasks(c *gin.Context) {
+	// 读取状态过滤参数
+	status := c.Query("status")
+
+	// 校验 status 是否合法
+	switch status {
+	case "", "todo", "doing", "done":
+		// 合法状态
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":    "INVALID_ARGUMENT",
+			"message": "无效的 status 参数",
+		})
+		return
+	}
 
 	// 1. JWT 身份验证
 	userID, ok := taskUserID(c)
@@ -186,6 +200,7 @@ func (h *TaskHandler) ListTasks(c *gin.Context) {
 		projectID,
 		page,
 		pageSize,
+		status,
 	)
 
 	if err != nil {

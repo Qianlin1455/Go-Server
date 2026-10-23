@@ -41,7 +41,7 @@ func TestRepositoryStorageCauses(t *testing.T) {
 		{"create task", "create", func(db *gorm.DB) error { return CreateTask(ctx, db, &model.Task{}) }},
 		{"get task", "query", func(db *gorm.DB) error { _, e := GetTaskByID(ctx, db, 1, 2, 3); return e }},
 		{"get user task", "query", func(db *gorm.DB) error { _, e := GetTaskByUserID(ctx, db, 1, 2); return e }},
-		{"list tasks", "query", func(db *gorm.DB) error { _, e := ListTasks(ctx, db, 1, 2, 1, 10); return e }},
+		{"list tasks", "query", func(db *gorm.DB) error { _, e := ListTasks(ctx, db, 1, 2, 1, 10, ""); return e }},
 		{"update task", "update", func(db *gorm.DB) error {
 			_, e := UpdateTaskStatusCAS(ctx, db, 1, 2, 3, "todo", "doing", 1, nil)
 			return e
