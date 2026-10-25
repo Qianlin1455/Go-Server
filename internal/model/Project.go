@@ -18,9 +18,9 @@ type Project struct {
 
 	Status string `gorm:"column:status;type:varchar(16);not null;default:active"`
 
-	CreatedAt time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoCreateTime"`
+	CreatedAt time.Time `gorm:"column:created_at;type:datetime(3);not null;autoCreateTime"`
 
-	UpdatedAt time.Time `gorm:"column:updated_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);autoUpdateTime"`
+	UpdatedAt time.Time `gorm:"column:updated_at;type:datetime(3);not null;autoUpdateTime"`
 }
 
 func (Project) TableName() string {
