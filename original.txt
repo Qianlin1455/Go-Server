@@ -1,0 +1,16 @@
+goos: windows
+goarch: amd64
+pkg: GoServer/internal/repository
+cpu: Intel(R) Core(TM) i9-14900HX
+BenchmarkTaskList-32    	     186	   7376175 ns/op	    7657 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     176	   6486303 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     194	   6298611 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     188	   6236063 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     189	   6802300 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     156	   6414307 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     189	   6468588 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     186	   6565839 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     176	   6525583 ns/op	    7656 B/op	     362 allocs/op
+BenchmarkTaskList-32    	     178	   6552729 ns/op	    7656 B/op	     362 allocs/op
+PASS
+ok  	GoServer/internal/repository	21.562s

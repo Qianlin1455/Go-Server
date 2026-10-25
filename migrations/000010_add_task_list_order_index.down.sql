@@ -1,0 +1,2 @@
+DROP INDEX idx_tasks_project_user_created_id
+ON tasks;

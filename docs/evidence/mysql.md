@@ -5,6 +5,10 @@
 > 证据状态：已完成 SQL 执行计划对照、连接池基线、HTTP 超时与事务回滚验证；正式索引变更待决策。  
 > 原则：只记录本次实际观测；单次 `EXPLAIN ANALYZE` 不当作稳定性能基准，不声称确定的性能提升倍数。
 
+> 最后更新：2026-10-25  
+> 证据状态：已完成任务列表索引对照实验；正式索引 migration 已应用至 `go_db`，迁移版本为 10，`dirty = 0`；真实业务库执行计划已验证自然选择候选索引。迁移后的完整回归测试仍需补充确认。  
+> 原则：只记录实际观测；区分合成数据与业务数据、单次执行计划与重复基准，不将调用链累计采样解释为函数自身耗时，不编造性能提升倍数。
+
 ## 1. 环境与隔离
 
 | 场景 | 数据库 | 用途 |
@@ -209,7 +213,20 @@ go test -p 1 ./internal/midware -run '^TestTimeoutRollsBackTransaction$' -v -cou
 
 | 事项 | 结论 | 动作 |
 | --- | --- | --- |
-| 项目任务列表 | 候选索引可避免独立 Sort，减少节点输出的无关行数 | 候选索引仅在 `go_server_perf` 保留，暂不进入 migration |
+| 项目任务列表 | 候选索引可避免独立 Sort，减少节点输出的无关行数 | **最终索引决策（2026-10-25）**
+
+正式采用复合索引：
+
+`idx_tasks_project_user_created_id (project_id, user_id, created_at DESC, id DESC)`
+
+决策依据：
+
+1. 原索引 `idx_tasks_project_user_status_id (project_id, user_id, status, id)` 可以利用项目和用户的等值过滤条件，但不能直接满足不带 `status` 过滤的 `created_at DESC, id DESC` 排序。
+2. 候选索引将排序列放在过滤列之后，使 MySQL 能按索引顺序读取结果，避免独立的 Sort 算子，并利用 `LIMIT 20` 提前停止读取。
+3. `benchstat` 对照结果显示，任务列表 Benchmark 的 `sec/op` 下降 92.10%，且统计检验显示显著差异。该结果来自独立性能实验表，不等同于生产环境收益承诺。
+4. 已通过 migration 将索引应用至 `go_db`，并通过 `SHOW INDEX` 和不带 `FORCE INDEX` 的 `EXPLAIN ANALYZE` 验证索引结构及自然选择结果。
+
+**取舍：** 保留原索引。当前证据只证明新索引适合任务列表的过滤和排序形态，尚不足以证明原索引对带 `status` 过滤的其他查询完全冗余。新索引的写入维护成本尚未单独测量，不作无证据的性能结论。 |
 | 会话消息列表 | 已有 `(conversation_id, id)` 满足当前查询 | 暂不新增索引 |
 | 连接池 | 小 MaxOpen 限制当前固定等待查询负载的并发吞吐 | 记录 WaitCount/WaitDuration；不以模拟 SQL 直接配置生产环境 |
 | Context 超时 | HTTP 504、DB 超时传播均已验证 | 保留回归测试 |
@@ -226,3 +243,177 @@ go test -p 1 ./internal/midware -run '^TestTimeoutRollsBackTransaction$' -v -cou
 ---
 
 > 证据解释：上表、执行计划和测试值均来自 2026-10-23 的本地输出记录；尚未执行的命令、正式库上线收益和错误根因都没有被写成既成事实。
+
+## 6. 2026-10-25：任务列表索引正式迁移与验收
+
+### 6.1 正式迁移
+
+目标数据库：`go_db`。
+
+Migration：`000010`，任务列表排序索引变更。
+
+迁移后查询：
+
+```sql
+SELECT version, dirty
+FROM schema_migrations;
+```
+
+实际结果：
+
+| version | dirty | 结论 |
+|---:|---:|---|
+| 10 | 0 | 迁移版本正常，无 dirty 标记 |
+
+通过 `SHOW INDEX FROM tasks` 确认索引列结构如下：
+
+| Seq_in_index | Column_name | Collation |
+|---:|---|---|
+| 1 | project_id | A |
+| 2 | user_id | A |
+| 3 | created_at | D |
+| 4 | id | D |
+
+索引定义：
+
+```sql
+CREATE INDEX idx_tasks_project_user_created_id
+ON tasks (
+    project_id,
+    user_id,
+    created_at DESC,
+    id DESC
+);
+```
+
+### 6.2 真实业务库执行计划
+
+查询条件：`project_id = 1 AND user_id = 1`。
+
+排序：`created_at DESC, id DESC`。
+
+分页：`LIMIT 20`。
+
+本次不使用 `FORCE INDEX`，观察 MySQL 优化器自然选择的访问路径。
+
+实际执行计划：
+
+```text
+-> Limit: 20 row(s) (cost=583 rows=20)
+   (actual time=0.0984..0.259 rows=20 loops=1)
+
+    -> Index lookup on tasks using
+       idx_tasks_project_user_created_id
+       (project_id=1, user_id=1)
+       (cost=583 rows=5098)
+       (actual time=0.0743..0.234 rows=20 loops=1)
+```
+
+观察结果：
+
+- 优化器自然选择 `idx_tasks_project_user_created_id`。
+- 执行计划中没有独立的 `Sort` 算子。
+- 索引查找节点向上层返回 20 行，满足 `LIMIT 20`。
+- 最外层 Limit 节点本次报告的实际耗时约为 0.259 ms。
+
+解释限制：
+
+`cost=583` 和 `rows=5098` 是优化器估算，不是实际耗时或精确扫描行数。`actual time` 是执行计划节点的计时，父子节点耗时不能简单相加。本次结果只代表当前数据库、数据分布和执行条件下的一次观测。
+
+### 6.3 独立性能实验：EXPLAIN ANALYZE
+
+实验表：`go_server_perf.tasks_bench`，共 10,000 条任务。
+
+查询形态：
+
+```sql
+SELECT *
+FROM tasks_bench
+WHERE project_id = 1
+  AND user_id = 1
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+```
+
+使用 `FORCE INDEX` 进行受控访问路径对照：
+
+| 指标 | 原索引 | 候选索引 |
+|---|---:|---:|
+| 索引查找节点实际返回行数 | 10,000 | 20 |
+| 是否存在独立 Sort | 是 | 否 |
+| Limit 节点实际耗时 | 约 7.26 ms | 约 0.0523 ms |
+
+观察结论：
+
+原索引需要将大量匹配行交给排序节点，再选出前 20 行；候选索引能够按目标顺序读取，避免额外排序。
+
+该结果来自合成数据上的单次受控执行计划对照，不作为生产环境性能提升倍数的承诺。
+
+### 6.4 Go Benchmark 与 benchstat
+
+对照命令结果：`benchstat original.txt candidate.txt`。
+
+| 指标 | Original | Candidate | 变化 |
+|---|---:|---:|---:|
+| `sec/op` | 6505.9 μs/op ± 5% | 514.3 μs/op ± 14% | -92.10% |
+| `B/op` | 7.477 KiB | 7.487 KiB | +0.14% |
+| `allocs/op` | 362 | 362 | 无变化 |
+
+统计结果：
+
+- `p=0.000` 是工具显示精度下的结果，不代表真实概率严格等于零。
+- `n=10` 表示每组有 10 个样本。
+- 在这组实验中，候选索引的每次操作耗时明显低于原索引。
+- 分配字节数和分配次数基本不变，支持本次收益主要来自数据库访问路径改善，而不是 Go 侧内存分配减少。
+
+上述数据来自 `go_server_perf` 的 Benchmark，不能直接等同于真实业务数据库的端到端延迟。
+
+### 6.5 分阶段计时与 pprof 诊断
+
+分阶段计时的三轮输出：
+
+| 指标 | 第 1 轮 | 第 2 轮 | 第 3 轮 |
+|---|---:|---:|---:|
+| Benchmark `ns/op` | 634.9 μs | 569.3 μs | 548.3 μs |
+| Query | 603.5 μs | 546.3 μs | 524.7 μs |
+| Next | 15.0 μs | 12.2 μs | 12.0 μs |
+| Scan | 11.8 μs | 7.0 μs | 7.8 μs |
+
+三轮平均值约为：
+
+- Query：558.2 μs/op
+- Next：13.0 μs/op
+- Scan：8.9 μs/op
+- Benchmark 总耗时：584.2 μs/op
+
+Query 占据大部分应用侧墙钟时间，但其计时边界包括连接获取、请求发送、数据库处理和初始响应读取等开销，不能直接解释为 MySQL 执行时间。
+
+CPU Profile 观察：
+
+- `runtime.cgocall`：flat 2.08 s，占样本总时间 59.60%。
+- `consumeTaskList`：flat 0.01 s，cum 3.07 s，占 87.97%。
+- `mysqlConn.QueryContext`：cum 2.26 s，占 64.76%。
+- `database/sql.convertAssignRows`：flat 0.12 s，占 3.44%。
+
+解释：
+
+`consumeTaskList` 的累计采样高而自身采样低，说明大量样本来自其下游调用链。Profile 可帮助定位 Go Runtime、数据库驱动和系统调用路径，但不能据此拆出 MySQL 内部执行时间或把系统调用采样直接解释为网络等待。
+
+分阶段计时与 CPU Profile 用于诊断调用边界和 Go 侧热点；本次索引决策主要由执行计划结构变化与 Benchmark 对照结果支持。
+
+### 6.6 最终结论与剩余验收
+
+已完成：
+
+- 正式索引 migration 已应用至 `go_db`。
+- `schema_migrations` 为 `version=10, dirty=0`。
+- `SHOW INDEX` 确认四列索引顺序正确。
+- 真实业务库不带 `FORCE INDEX` 的执行计划自然选择新索引，且没有独立 Sort。
+- 独立性能实验的执行计划与 `benchstat` 对照均支持候选索引的收益。
+
+尚未记录为完成：
+
+- migration 后再次运行完整回归测试 `go test -p 1 ./... -count=1` 的结果。
+- 新索引对写入维护成本的独立测量。
+
+后续仅完成必要的回归验收和文档提交，不继续扩大本轮性能测量范围。
