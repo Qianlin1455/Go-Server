@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"GoServer/internal/cache"
 	"GoServer/internal/database"
 	"GoServer/internal/handler"
 	"GoServer/internal/midware"
@@ -87,6 +89,48 @@ func main() {
 	}()
 
 	// ========================================
+	// 初始化 Redis 缓存客户端
+	// ========================================
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "127.0.0.1:6380"
+	}
+
+	redisCache, cacheErr := cache.NewRedisCache(
+		redisAddr,
+		os.Getenv("REDIS_PASSWORD"),
+		0,
+		"go-server:v1",
+		100*time.Millisecond,
+		5*time.Minute,
+	)
+
+	if cacheErr != nil {
+		log.Printf(
+			"Redis cache initialization failed: %v",
+			cacheErr,
+		)
+	} else {
+		defer func() {
+			if err := redisCache.Close(); err != nil {
+				log.Printf("close Redis client: %v", err)
+			}
+		}()
+
+		if err := redisCache.Ping(context.Background()); err != nil {
+			log.Printf(
+				"Redis unavailable at startup: %v",
+				err,
+			)
+		} else {
+			log.Printf(
+				"Redis cache connected at %s",
+				redisAddr,
+			)
+		}
+	}
+
+	// ========================================
 	// 2. 初始化 JWTManager
 	// ========================================
 	jwtSecret := os.Getenv("JWT_SECRET")
@@ -109,6 +153,13 @@ func main() {
 	authHandler := handler.NewAuthHandler(authService)
 
 	projectService := service.NewProjectService(db)
+
+	if redisCache != nil {
+		projectService = service.NewProjectServiceWithCache(
+			db,
+			redisCache,
+		)
+	}
 	projectHandler := handler.NewProjectHandler(projectService)
 
 	conversationService := service.NewConversationService(db)
