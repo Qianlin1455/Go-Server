@@ -65,3 +65,46 @@ func ListProjects(
 	}
 	return projects, nil
 }
+
+func UpdateProjectName(
+	ctx context.Context,
+	db *gorm.DB,
+	userID, projectID uint64,
+	name string,
+) (*model.Project, error) {
+	var updated *model.Project
+
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1. 校验项目归属，并锁定目标记录
+		_, err := GetProjectForUpdate(
+			ctx, tx, userID, projectID,
+		)
+		if err != nil {
+			return err
+		}
+
+		// 2. 在事务内更新项目名称
+		result := tx.WithContext(ctx).
+			Model(&model.Project{}).
+			Where("id = ? AND user_id = ?", projectID, userID).
+			Update("name", name)
+
+		if result.Error != nil {
+			return databaseError(
+				ctx, "update project name", result.Error,
+			)
+		}
+
+		// 3. 读取更新后的数据库记录
+		updated, err = GetProjectByID(
+			ctx, tx, userID, projectID,
+		)
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return updated, nil
+}

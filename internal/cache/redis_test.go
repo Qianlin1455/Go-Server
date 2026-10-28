@@ -101,3 +101,38 @@ func TestRedisCacheIntegration(t *testing.T) {
 		t.Fatalf("expected cache miss after expiration, got %q", got)
 	}
 }
+
+func TestRedisCache_TTLJitter(t *testing.T) {
+	baseTTL := 300 * time.Second
+
+	c := &RedisCache{
+		ttl: baseTTL,
+	}
+
+	minTTL := baseTTL
+	maxTTL := baseTTL + baseTTL/10
+
+	observed := make(map[time.Duration]bool)
+
+	for i := 0; i < 100; i++ {
+		ttl := c.effectiveTTL()
+
+		if ttl < minTTL || ttl > maxTTL {
+			t.Fatalf(
+				"TTL 超出范围: %v, 预期 [%v, %v]",
+				ttl, minTTL, maxTTL,
+			)
+		}
+
+		observed[ttl] = true
+	}
+
+	if len(observed) < 2 {
+		t.Fatal("TTL 没有表现出随机变化")
+	}
+
+	t.Logf(
+		"PASS: TTL 范围 [%v, %v], 不同取值数=%d",
+		minTTL, maxTTL, len(observed),
+	)
+}

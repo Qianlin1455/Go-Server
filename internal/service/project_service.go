@@ -13,6 +13,7 @@ import (
 	"GoServer/internal/model"
 	"GoServer/internal/repository"
 
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
@@ -25,11 +26,22 @@ var (
 type ProjectCache interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
 	Set(ctx context.Context, key string, value []byte) error
+	Delete(ctx context.Context, key string) error
 }
 
 type ProjectService struct {
-	db    *gorm.DB
-	cache ProjectCache
+	db     *gorm.DB
+	cache  ProjectCache
+	flight singleflight.Group
+}
+
+type cachedProject struct {
+	UserID  uint64        `json:"user_id"`
+	Project ProjectResult `json:"project"`
+}
+
+func projectCacheKey(userID, projectID uint64) string {
+	return fmt.Sprintf("project:%d:%d", userID, projectID)
 }
 
 func NewProjectService(db *gorm.DB) *ProjectService {
@@ -106,43 +118,46 @@ func (s *ProjectService) CreateProject(
 	}, nil
 }
 
-func (s *ProjectService) GetProject(
+func (s *ProjectService) readProjectCache(
 	ctx context.Context,
-	userID uint64,
-	projectID uint64,
+	key string,
+	userID, projectID uint64,
+) (*ProjectResult, bool) {
+	if s.cache == nil {
+		return nil, false
+	}
+
+	data, hit, err := s.cache.Get(ctx, key)
+	if err != nil {
+		log.Printf(
+			"project cache GET failed: user_id=%d project_id=%d err=%v",
+			userID, projectID, err,
+		)
+		return nil, false
+	}
+
+	if !hit {
+		return nil, false
+	}
+
+	var cached cachedProject
+	if err := json.Unmarshal(data, &cached); err == nil &&
+		cached.UserID == userID &&
+		cached.Project.ID == projectID {
+		return &cached.Project, true
+	}
+
+	log.Printf(
+		"project cache contains invalid data: user_id=%d project_id=%d",
+		userID, projectID,
+	)
+	return nil, false
+}
+
+func (s *ProjectService) loadProjectFromDB(ctx context.Context,
+	userID, projectID uint64,
+	key string,
 ) (*ProjectResult, error) {
-	if userID == 0 || projectID == 0 {
-		return nil, ErrInvalidProjectInput
-	}
-
-	// 必须同时包含 userID 和 projectID。
-	key := fmt.Sprintf("project:%d:%d", userID, projectID)
-
-	// 1. 优先读取 Redis。
-	if s.cache != nil {
-		data, hit, err := s.cache.Get(ctx, key)
-
-		if err != nil {
-			log.Printf(
-				"project cache GET failed: user_id=%d project_id=%d err=%v",
-				userID, projectID, err,
-			)
-		} else if hit {
-			var cached ProjectResult
-
-			if err := json.Unmarshal(data, &cached); err == nil &&
-				cached.ID == projectID {
-				return &cached, nil
-			}
-
-			log.Printf(
-				"project cache contains invalid data: user_id=%d project_id=%d",
-				userID, projectID,
-			)
-		}
-	}
-
-	// 2. 缓存未命中或异常，查询 MySQL。
 	project, err := repository.GetProjectByID(
 		ctx, s.db, userID, projectID,
 	)
@@ -150,7 +165,7 @@ func (s *ProjectService) GetProject(
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, ErrProjectNotFound
 		}
-		return nil, fmt.Errorf("get project: %w", err)
+		return nil, fmt.Errorf("get project:%w", err)
 	}
 
 	result := &ProjectResult{
@@ -161,10 +176,12 @@ func (s *ProjectService) GetProject(
 		CreatedAt:   project.CreatedAt,
 		UpdatedAt:   project.UpdatedAt,
 	}
-
-	// 3. 回填缓存，写入失败不影响数据库查询结果。
 	if s.cache != nil {
-		data, err := json.Marshal(result)
+		data, err := json.Marshal(cachedProject{
+			UserID:  userID,
+			Project: *result,
+		})
+
 		if err != nil {
 			log.Printf("project cache marshal failed: %v", err)
 		} else if err := s.cache.Set(ctx, key, data); err != nil {
@@ -176,6 +193,61 @@ func (s *ProjectService) GetProject(
 	}
 
 	return result, nil
+}
+
+func (s *ProjectService) GetProject(
+	ctx context.Context,
+	userID, projectID uint64,
+) (*ProjectResult, error) {
+	if userID == 0 || projectID == 0 {
+		return nil, ErrInvalidProjectInput
+	}
+	//无缓存
+	key := projectCacheKey(userID, projectID)
+	if s.cache == nil {
+		return s.loadProjectFromDB(
+			ctx, userID, projectID, key,
+		)
+	}
+
+	if result, hit := s.readProjectCache(
+		ctx, key, userID, projectID,
+	); hit {
+		return result, nil
+	}
+
+	//redis miss
+	resultCh := s.flight.DoChan(key, func() (any, error) {
+		// 共享查询使用独立生命周期
+		workCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			2*time.Second,
+		)
+		defer cancel()
+
+		// Double Check
+		if result, hit := s.readProjectCache(
+			workCtx, key, userID, projectID,
+		); hit {
+			return result, nil
+		}
+
+		return s.loadProjectFromDB(
+			workCtx, userID, projectID, key,
+		)
+	})
+
+	// 每个请求独立决定是否继续等待
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		return result.Val.(*ProjectResult), nil
+	}
+
 }
 
 func (s *ProjectService) ListProjects(
@@ -231,4 +303,66 @@ func (s *ProjectService) ListProjects(
 	}
 
 	return result, nil
+}
+
+func (s *ProjectService) UpdateProjectName(
+	ctx context.Context,
+	userID, projectID uint64,
+	newName string,
+) (*ProjectResult, error) {
+	name := strings.TrimSpace(newName)
+
+	if userID == 0 || projectID == 0 || name == "" || utf8.RuneCountInString(name) > 128 {
+		return nil, ErrInvalidProjectInput
+	}
+
+	//更新数据库
+	project, err := repository.UpdateProjectName(
+		ctx, s.db, userID, projectID, name,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrNotFound):
+			return nil, ErrProjectNotFound
+		case errors.Is(err, repository.ErrAlreadyExists):
+			return nil, ErrProjectAlreadyExists
+		default:
+			return nil, fmt.Errorf(
+				"update project name: %w", err,
+			)
+		}
+	}
+
+	//缓存失效
+	if s.cache != nil {
+		key := projectCacheKey(userID, projectID)
+		invalidateCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			2*time.Second,
+		)
+		defer cancel()
+
+		if err := s.cache.Delete(invalidateCtx, key); err != nil {
+			log.Printf(
+				"project cache DELETE failed: "+
+					"user_id=%d project_id=%d "+
+					"db_committed=true err=%v",
+				userID, projectID, err,
+			)
+			// 数据库已提交，不能假装事务回滚。
+			// 必须向调用方暴露这次部分成功。
+			return nil, fmt.Errorf(
+				"project updated but cache invalidation failed: %w",
+				err,
+			)
+		}
+	}
+	return &ProjectResult{
+		ID:          project.ID,
+		Name:        project.Name,
+		Description: project.Description,
+		Status:      project.Status,
+		CreatedAt:   project.CreatedAt,
+		UpdatedAt:   project.UpdatedAt,
+	}, nil
 }
