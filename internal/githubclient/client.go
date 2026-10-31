@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -143,10 +144,28 @@ func (c *Client) doJSON(
 
 	req.Header.Set("Accept", "application/vnd.github+json")
 
+	start := time.Now()
+
 	resp, err := c.httpClient.Do(req)
+
 	if err != nil {
+		log.Printf(
+			"GitHub HTTP FAILED path=%s elapsed=%s ctx_err=%v err=%v",
+			path,
+			time.Since(start),
+			ctx.Err(),
+			err,
+		)
 		return classifyRequestError(err)
 	}
+
+	log.Printf(
+		"GitHub HTTP HEADERS path=%s status=%d elapsed=%s",
+		path,
+		resp.StatusCode,
+		time.Since(start),
+	)
+
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {

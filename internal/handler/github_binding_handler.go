@@ -1,14 +1,14 @@
 package handler
 
 import (
+	"GoServer/internal/githubclient"
+	"GoServer/internal/midware"
+	"GoServer/internal/model"
+	"GoServer/internal/service"
 	"context"
 	"errors"
 	"net/http"
 	"strconv"
-
-	"GoServer/internal/githubclient"
-	"GoServer/internal/model"
-	"GoServer/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -38,8 +38,10 @@ type bindRepositoryRequest struct {
 
 func (h *GitHubBindingHandler) Bind(c *gin.Context) {
 	// 1. 从 JWT Middleware 获取身份
-	userID := c.GetUint64("user_id")
-	if userID == 0 {
+	userID, ok := midware.UserIDFromContext(
+		c.Request.Context(),
+	)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"code":    "UNAUTHORIZED",
 			"message": "authentication required",

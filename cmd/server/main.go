@@ -215,7 +215,7 @@ func main() {
 		)
 	}))
 
-	r.Use(midware.Timeout(3 * time.Second))
+	r.Use(midware.Timeout(12 * time.Second))
 
 	// ========================================
 	// 6. 注册公共路由
