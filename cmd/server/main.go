@@ -9,12 +9,12 @@ import (
 
 	"GoServer/internal/cache"
 	"GoServer/internal/database"
+	"GoServer/internal/githubclient"
 	"GoServer/internal/handler"
 	"GoServer/internal/midware"
 	"GoServer/internal/response"
 	"GoServer/internal/security"
 	"GoServer/internal/service"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -179,6 +179,15 @@ func main() {
 		evidenceService,
 	)
 
+	githubSvc := service.NewGitHubBindingService(
+		db,
+		githubclient.NewClient(),
+	)
+
+	githubHandler := handler.NewGitHubBindingHandler(
+		githubSvc,
+	)
+
 	// ========================================
 	// 4. 创建 Gin Engine
 	// ========================================
@@ -268,6 +277,11 @@ func main() {
 		private.POST(
 			"/tasks/:id/evidence",
 			evidenceHandler.CreateEvidence,
+		)
+
+		private.POST(
+			"/projects/:id/repositories",
+			githubHandler.Bind,
 		)
 	}
 	// ========================================

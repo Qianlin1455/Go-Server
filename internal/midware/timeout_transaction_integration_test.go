@@ -15,8 +15,8 @@ import (
 )
 
 func TestTimeoutRollsBackTransaction(t *testing.T) {
-	if os.Getenv("MYSQL_DSN") == "" {
-		t.Fatal("MYSQL_DSN 未设置")
+	if os.Getenv("TEST_MYSQL_DSN") == "" {
+		t.Fatal("TEST_MYSQL_DSN 未设置")
 	}
 
 	db, err := database.InitDB()
