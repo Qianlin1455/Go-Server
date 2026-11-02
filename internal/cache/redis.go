@@ -11,13 +11,15 @@ import (
 )
 
 type RedisCache struct {
-	client  *redis.Client
-	prefix  string
-	timeout time.Duration
-	ttl     time.Duration
+	client     *redis.Client
+	prefix     string
+	timeout    time.Duration
+	ttl        time.Duration
+	ownsClient bool
 }
 
 var (
+	ErrNilClient           = errors.New("redis client is required")
 	ErrMissingAddrOrPrefix = errors.New("redis address and key prefix are required")
 	ErrInvalidInput        = errors.New("invalid redis db,timeout or ttl")
 	ErrEmptyKey            = errors.New("cache key must not be empty")
@@ -31,6 +33,39 @@ func (c *RedisCache) effectiveTTL() time.Duration {
 	return c.ttl + time.Duration(
 		rand.Int64N(int64(jitter)+1),
 	)
+}
+
+// NewRedisCacheWithClient 使用外部注入的 Redis Client。
+// Client 的生命周期由调用方管理。
+func NewRedisCacheWithClient(
+	client *redis.Client,
+	prefix string,
+	timeout time.Duration,
+	ttl time.Duration,
+) (*RedisCache, error) {
+
+	prefix = strings.TrimSpace(prefix)
+	prefix = strings.Trim(prefix, ":")
+
+	if client == nil {
+		return nil, ErrNilClient
+	}
+
+	if prefix == "" {
+		return nil, ErrMissingAddrOrPrefix
+	}
+
+	if timeout <= 0 || ttl <= 0 {
+		return nil, ErrInvalidInput
+	}
+
+	return &RedisCache{
+		client:     client,
+		prefix:     prefix,
+		timeout:    timeout,
+		ttl:        ttl,
+		ownsClient: false,
+	}, nil
 }
 
 func NewRedisCache(addr string, password string, db int, prefix string,
@@ -59,10 +94,11 @@ func NewRedisCache(addr string, password string, db int, prefix string,
 	})
 
 	return &RedisCache{
-		client:  client,
-		prefix:  prefix,
-		timeout: timeout,
-		ttl:     ttl,
+		client:     client,
+		prefix:     prefix,
+		timeout:    timeout,
+		ttl:        ttl,
+		ownsClient: true,
 	}, nil
 }
 
@@ -131,5 +167,9 @@ func (c *RedisCache) Ping(ctx context.Context) error {
 }
 
 func (c *RedisCache) Close() error {
+	if !c.ownsClient {
+		return nil
+	}
+
 	return c.client.Close()
 }

@@ -12,10 +12,13 @@ import (
 	"GoServer/internal/githubclient"
 	"GoServer/internal/handler"
 	"GoServer/internal/midware"
+	"GoServer/internal/ratelimit"
 	"GoServer/internal/response"
 	"GoServer/internal/security"
 	"GoServer/internal/service"
+
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -89,21 +92,51 @@ func main() {
 	}()
 
 	// ========================================
-	// 初始化 Redis 缓存客户端
+	// 初始化共享 Redis Client
 	// ========================================
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
-		redisAddr = "127.0.0.1:6380"
+		redisAddr = "127.0.0.1:6379"
 	}
 
-	redisCache, cacheErr := cache.NewRedisCache(
-		redisAddr,
-		os.Getenv("REDIS_PASSWORD"),
-		0,
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:                  redisAddr,
+		Password:              os.Getenv("REDIS_PASSWORD"),
+		DB:                    0,
+		DialTimeout:           100 * time.Millisecond,
+		ReadTimeout:           100 * time.Millisecond,
+		WriteTimeout:          100 * time.Millisecond,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	})
+
+	// main.go 统一负责关闭共享客户端。
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("close Redis client: %v", err)
+		}
+	}()
+
+	// 创建限流器。
+	rateLimiter := ratelimit.NewRedisLimiter(redisClient)
+
+	// 创建缓存组件，注入同一个 Redis Client。
+	redisCache, cacheErr := cache.NewRedisCacheWithClient(
+		redisClient,
 		"go-server:v1",
 		100*time.Millisecond,
 		5*time.Minute,
 	)
+
+	if cacheErr != nil {
+		log.Printf("Redis cache initialization failed: %v", cacheErr)
+	} else {
+		if err := redisCache.Ping(context.Background()); err != nil {
+			log.Printf("Redis unavailable at startup: %v", err)
+		} else {
+			log.Printf("Redis connected at %s", redisAddr)
+		}
+	}
 
 	if cacheErr != nil {
 		log.Printf(
@@ -281,6 +314,12 @@ func main() {
 
 		private.POST(
 			"/projects/:id/repositories",
+			midware.RateLimit(
+				rateLimiter,
+				"repo_bind",
+				10,
+				time.Minute,
+			),
 			githubHandler.Bind,
 		)
 	}

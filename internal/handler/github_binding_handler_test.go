@@ -9,8 +9,11 @@ import (
 	"testing"
 
 	"GoServer/internal/githubclient"
+	"GoServer/internal/midware"
 	"GoServer/internal/model"
+	"GoServer/internal/security"
 	"GoServer/internal/service"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -43,6 +46,7 @@ func (f *fakeRepositoryBinder) BindRepository(
 
 // 构造独立的测试路由。
 // 这里只模拟 JWT 已认证后的 Context，不测试真实 JWT。
+
 func runGitHubBindingRequest(
 	t *testing.T,
 	fake *fakeRepositoryBinder,
@@ -53,17 +57,23 @@ func runGitHubBindingRequest(
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
-	r := gin.New()
 
+	// 创建真实 JWT Manager。
+	jwtManager, err := security.NewJWTManager(
+		"01234567890123456789012345678901",
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("create JWT manager: %v", err)
+	}
+
+	r := gin.New()
 	h := NewGitHubBindingHandler(fake)
 
-	r.POST("/projects/:pid/repositories",
-		func(c *gin.Context) {
-			if userID != 0 {
-				c.Set("user_id", userID)
-			}
-			c.Next()
-		},
+	// 路径参数必须与生产路由和 Handler 保持一致。
+	r.POST(
+		"/projects/:id/repositories",
+		midware.JWTAuth(jwtManager),
 		h.Bind,
 	)
 
@@ -73,6 +83,19 @@ func runGitHubBindingRequest(
 		strings.NewReader(body),
 	)
 	req.Header.Set("Content-Type", "application/json")
+
+	// 模拟真实客户端携带 JWT。
+	if userID != 0 {
+		token, err := jwtManager.Generate(userID)
+		if err != nil {
+			t.Fatalf("generate JWT: %v", err)
+		}
+
+		req.Header.Set(
+			"Authorization",
+			"Bearer "+token,
+		)
+	}
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
