@@ -11,6 +11,7 @@ import (
 	"GoServer/internal/database"
 	"GoServer/internal/githubclient"
 	"GoServer/internal/handler"
+	"GoServer/internal/idempotency"
 	"GoServer/internal/midware"
 	"GoServer/internal/ratelimit"
 	"GoServer/internal/response"
@@ -182,6 +183,21 @@ func main() {
 	// ========================================
 	// 3. 初始化 Service 和 Handler
 	// ========================================
+	importGate, err := idempotency.NewRedisGate(
+		redisClient,
+		15*time.Second,
+	)
+	if err != nil {
+		log.Fatalf("initialize import gate: %v", err)
+	}
+
+	importService := service.NewImportJobServiceWithGate(
+		db,
+		importGate,
+	)
+
+	importHandler := handler.NewImportHandler(importService)
+
 	authService := service.NewAuthService(db, jwtManager)
 	authHandler := handler.NewAuthHandler(authService)
 
@@ -321,6 +337,10 @@ func main() {
 				time.Minute,
 			),
 			githubHandler.Bind,
+		)
+		private.POST(
+			"/projects/:id/imports",
+			importHandler.Create,
 		)
 	}
 	// ========================================
