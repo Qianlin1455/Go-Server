@@ -154,42 +154,86 @@ func (s *ProjectService) readProjectCache(
 	return nil, false
 }
 
-func (s *ProjectService) loadProjectFromDB(ctx context.Context,
+func (s *ProjectService) loadProjectFromDB(
+	ctx context.Context,
 	userID, projectID uint64,
-	key string,
 ) (*ProjectResult, error) {
 	project, err := repository.GetProjectByID(
-		ctx, s.db, userID, projectID,
+		ctx,
+		s.db,
+		userID,
+		projectID,
 	)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, ErrProjectNotFound
 		}
-		return nil, fmt.Errorf("get project:%w", err)
+
+		return nil, fmt.Errorf("get project: %w", err)
 	}
 
-	result := &ProjectResult{
-		ID:          project.ID,
-		Name:        project.Name,
-		Description: project.Description,
-		Status:      project.Status,
-		CreatedAt:   project.CreatedAt,
-		UpdatedAt:   project.UpdatedAt,
-	}
-	if s.cache != nil {
-		data, err := json.Marshal(cachedProject{
-			UserID:  userID,
-			Project: *result,
-		})
+	return toProjectResult(project), nil
+}
 
-		if err != nil {
-			log.Printf("project cache marshal failed: %v", err)
-		} else if err := s.cache.Set(ctx, key, data); err != nil {
-			log.Printf(
-				"project cache SET failed: user_id=%d project_id=%d err=%v",
-				userID, projectID, err,
+func (s *ProjectService) loadProjectFromDBWithCacheLock(
+	ctx context.Context,
+	userID, projectID uint64,
+	key string,
+) (*ProjectResult, error) {
+	var result *ProjectResult
+
+	err := s.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			// 1. 获取 MySQL 共享锁。
+			project, err := repository.GetProjectForShare(
+				ctx,
+				tx,
+				userID,
+				projectID,
 			)
+			if err != nil {
+				return err
+			}
+
+			result = toProjectResult(project)
+
+			// 2. 序列化缓存数据。
+			data, err := json.Marshal(cachedProject{
+				UserID:  userID,
+				Project: *result,
+			})
+			if err != nil {
+				log.Printf(
+					"project cache marshal failed: %v",
+					err,
+				)
+				return nil
+			}
+
+			// 3. 必须在共享锁释放前完成 Redis SET。
+			if err := s.cache.Set(ctx, key, data); err != nil {
+				log.Printf(
+					"project cache SET failed: "+
+						"user_id=%d project_id=%d err=%v",
+					userID,
+					projectID,
+					err,
+				)
+			}
+
+			return nil
+		},
+	)
+
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrProjectNotFound
 		}
+
+		return nil, fmt.Errorf(
+			"get project with cache lock: %w",
+			err,
+		)
 	}
 
 	return result, nil
@@ -206,7 +250,7 @@ func (s *ProjectService) GetProject(
 	key := projectCacheKey(userID, projectID)
 	if s.cache == nil {
 		return s.loadProjectFromDB(
-			ctx, userID, projectID, key,
+			ctx, userID, projectID,
 		)
 	}
 
@@ -232,8 +276,11 @@ func (s *ProjectService) GetProject(
 			return result, nil
 		}
 
-		return s.loadProjectFromDB(
-			workCtx, userID, projectID, key,
+		return s.loadProjectFromDBWithCacheLock(
+			workCtx,
+			userID,
+			projectID,
+			key,
 		)
 	})
 
@@ -316,47 +363,81 @@ func (s *ProjectService) UpdateProjectName(
 		return nil, ErrInvalidProjectInput
 	}
 
-	//更新数据库
-	project, err := repository.UpdateProjectName(
-		ctx, s.db, userID, projectID, name,
+	var project *model.Project
+
+	err := s.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			// 1. 获取排他锁并更新 MySQL。
+			var err error
+			project, err = repository.UpdateProjectNameInTx(
+				ctx,
+				tx,
+				userID,
+				projectID,
+				name,
+			)
+			if err != nil {
+				return err
+			}
+
+			// 2. MySQL 事务尚未提交，排他锁仍然持有。
+			if s.cache != nil {
+				key := projectCacheKey(userID, projectID)
+
+				invalidateCtx, cancel := context.WithTimeout(
+					context.WithoutCancel(ctx),
+					2*time.Second,
+				)
+				defer cancel()
+
+				// 3. Redis 删除失败，直接回滚 MySQL。
+				if err := s.cache.Delete(
+					invalidateCtx,
+					key,
+				); err != nil {
+					log.Printf(
+						"project cache DELETE failed: "+
+							"user_id=%d project_id=%d "+
+							"db_committed=false err=%v",
+						userID,
+						projectID,
+						err,
+					)
+
+					return fmt.Errorf(
+						"project cache invalidation failed: %w",
+						err,
+					)
+				}
+			}
+
+			// 4. 返回 nil，GORM 才会提交事务。
+			return nil
+		},
 	)
+
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrNotFound):
 			return nil, ErrProjectNotFound
+
 		case errors.Is(err, repository.ErrAlreadyExists):
 			return nil, ErrProjectAlreadyExists
+
 		default:
 			return nil, fmt.Errorf(
-				"update project name: %w", err,
-			)
-		}
-	}
-
-	//缓存失效
-	if s.cache != nil {
-		key := projectCacheKey(userID, projectID)
-		invalidateCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx),
-			2*time.Second,
-		)
-		defer cancel()
-
-		if err := s.cache.Delete(invalidateCtx, key); err != nil {
-			log.Printf(
-				"project cache DELETE failed: "+
-					"user_id=%d project_id=%d "+
-					"db_committed=true err=%v",
-				userID, projectID, err,
-			)
-			// 数据库已提交，不能假装事务回滚。
-			// 必须向调用方暴露这次部分成功。
-			return nil, fmt.Errorf(
-				"project updated but cache invalidation failed: %w",
+				"update project name: %w",
 				err,
 			)
 		}
 	}
+
+	return toProjectResult(project), nil
+}
+
+func toProjectResult(
+	project *model.Project,
+) *ProjectResult {
 	return &ProjectResult{
 		ID:          project.ID,
 		Name:        project.Name,
@@ -364,5 +445,5 @@ func (s *ProjectService) UpdateProjectName(
 		Status:      project.Status,
 		CreatedAt:   project.CreatedAt,
 		UpdatedAt:   project.UpdatedAt,
-	}, nil
+	}
 }

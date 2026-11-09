@@ -31,6 +31,73 @@ func GetProjectForUpdate(ctx context.Context, tx *gorm.DB, userID, projectID uin
 	return GetProjectByID(ctx, tx.Clauses(clause.Locking{Strength: "UPDATE"}), userID, projectID)
 }
 
+// GetProjectForShare 必须在事务中调用。
+// 共享锁在事务提交或回滚前持续持有。
+func GetProjectForShare(
+	ctx context.Context,
+	tx *gorm.DB,
+	userID, projectID uint64,
+) (*model.Project, error) {
+	return GetProjectByID(
+		ctx,
+		tx.Clauses(clause.Locking{
+			Strength: "SHARE",
+		}),
+		userID,
+		projectID,
+	)
+}
+
+// UpdateProjectNameInTx 必须在调用方提供的事务中执行。
+func UpdateProjectNameInTx(
+	ctx context.Context,
+	tx *gorm.DB,
+	userID, projectID uint64,
+	name string,
+) (*model.Project, error) {
+	// 1. 获取项目排他锁，并校验资源归属。
+	_, err := GetProjectForUpdate(
+		ctx,
+		tx,
+		userID,
+		projectID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 更新项目名称。
+	result := tx.WithContext(ctx).
+		Model(&model.Project{}).
+		Where(
+			"id = ? AND user_id = ?",
+			projectID,
+			userID,
+		).
+		Update("name", name)
+
+	if result.Error != nil {
+		return nil, databaseError(
+			ctx,
+			"update project name",
+			result.Error,
+		)
+	}
+
+	// 3. 读取更新后的记录。
+	updated, err := GetProjectByID(
+		ctx,
+		tx,
+		userID,
+		projectID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return updated, nil
+}
+
 func ListProjects(
 	ctx context.Context,
 	db *gorm.DB,
@@ -74,33 +141,21 @@ func UpdateProjectName(
 ) (*model.Project, error) {
 	var updated *model.Project
 
-	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. 校验项目归属，并锁定目标记录
-		_, err := GetProjectForUpdate(
-			ctx, tx, userID, projectID,
-		)
-		if err != nil {
-			return err
-		}
+	err := db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			var err error
 
-		// 2. 在事务内更新项目名称
-		result := tx.WithContext(ctx).
-			Model(&model.Project{}).
-			Where("id = ? AND user_id = ?", projectID, userID).
-			Update("name", name)
-
-		if result.Error != nil {
-			return databaseError(
-				ctx, "update project name", result.Error,
+			updated, err = UpdateProjectNameInTx(
+				ctx,
+				tx,
+				userID,
+				projectID,
+				name,
 			)
-		}
 
-		// 3. 读取更新后的数据库记录
-		updated, err = GetProjectByID(
-			ctx, tx, userID, projectID,
-		)
-		return err
-	})
+			return err
+		},
+	)
 
 	if err != nil {
 		return nil, err

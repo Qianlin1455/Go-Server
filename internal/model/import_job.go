@@ -3,10 +3,10 @@ package model
 import "time"
 
 const (
-	ImportJobPending = "pending"
-	ImportJobRunning = "running"
-	ImportJobFailed  = "failed"
-	ImportJobSuccess = "success"
+	ImportJobPending   = "pending"
+	ImportJobRunning   = "running"
+	ImportJobFailed    = "failed"
+	ImportJobSucceeded = "succeeded"
 )
 
 type ImportJob struct {
