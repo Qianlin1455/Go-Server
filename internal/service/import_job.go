@@ -233,7 +233,7 @@ func (s *ImportJobService) CreateImportJob(
 		IdempotencyKey:     input.IdempotencyKey,
 		RequestFingerprint: fingerprint,
 		RevisionSHA:        binding.LastSHA,
-		Status:             model.ImportJobPending,
+		Status:             model.ImportJobQueued,
 	}
 
 	err = s.jobs.Create(ctx, job)

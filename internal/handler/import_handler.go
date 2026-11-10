@@ -119,15 +119,15 @@ func (h *ImportHandler) Create(c *gin.Context) {
 	message := "existing import job returned"
 
 	if created {
-		status = http.StatusCreated
-		message = "import job created"
+		status = http.StatusAccepted
+		message = "import job accepted"
 	}
 
 	c.JSON(status, gin.H{
 		"code":    "SUCCESS",
 		"message": message,
 		"data": gin.H{
-			"id":            job.ID,
+			"job_id":        job.ID,
 			"project_id":    job.ProjectID,
 			"repository_id": job.RepositoryID,
 			"revision_sha":  job.RevisionSHA,

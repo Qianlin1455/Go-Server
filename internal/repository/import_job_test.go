@@ -46,7 +46,7 @@ func TestImportJob_Duplicate(t *testing.T) {
 		IdempotencyKey:     "test-key-001",
 		RequestFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		RevisionSHA:        repo.LastSHA,
-		Status:             model.ImportJobPending,
+		Status:             model.ImportJobQueued,
 	}
 
 	// 第一次插入应该成功

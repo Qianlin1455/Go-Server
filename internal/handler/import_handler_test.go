@@ -53,8 +53,7 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 这里使用单个测试事务。
-	// HTTP 请求顺序执行，测试结束后回滚。
+	// 使用单个事务，测试结束后自动回滚
 	tx := db.Begin()
 	if tx.Error != nil {
 		_ = sqlDB.Close()
@@ -103,15 +102,15 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4. 创建已绑定的 GitHub 仓库
+	// 4. 创建已绑定 GitHub 仓库
+	revisionSHA := strings.Repeat("a", 40)
+
 	repo := &model.Repository{
 		ProjectID:     project.ID,
 		Owner:         "golang",
 		Repo:          "go",
 		DefaultBranch: "master",
-		LastSHA: strings.Repeat(
-			"a", 40,
-		),
+		LastSHA:       revisionSHA,
 	}
 
 	if err := repository.NewGitHubRepositoryStore(tx).
@@ -119,7 +118,7 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 5. 创建真实 JWT
+	// 5. 创建 JWT
 	jwtManager, err := security.NewJWTManager(
 		"01234567890123456789012345678901",
 		time.Hour,
@@ -185,31 +184,39 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		return w
 	}
 
+	// 定义新版 HTTP 响应结构
+	type importResponse struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			JobID        uint64 `json:"job_id"`
+			ProjectID    uint64 `json:"project_id"`
+			RepositoryID uint64 `json:"repository_id"`
+			RevisionSHA  string `json:"revision_sha"`
+			Status       string `json:"status"`
+		} `json:"data"`
+	}
+
 	body := fmt.Sprintf(
 		`{"repository_id":%d}`,
 		repo.ID,
 	)
 
 	// ====================================================
-	// 场景一：首次创建 -> 201
+	// 场景一：首次创建 -> 202 Accepted
 	// ====================================================
 
 	first := send(tokenA, "http-test-key-001", body)
 
-	if first.Code != http.StatusCreated {
+	if first.Code != http.StatusAccepted {
 		t.Fatalf(
-			"first: want 201, got %d: %s",
+			"first: want 202, got %d: %s",
 			first.Code,
 			first.Body.String(),
 		)
 	}
 
-	var firstResponse struct {
-		Code string `json:"code"`
-		Data struct {
-			ID uint64 `json:"id"`
-		} `json:"data"`
-	}
+	var firstResponse importResponse
 
 	if err := json.Unmarshal(
 		first.Body.Bytes(), &firstResponse,
@@ -217,15 +224,47 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstID := firstResponse.Data.ID
-	if firstID == 0 {
-		t.Fatal("first job ID is zero")
+	if firstResponse.Code != "SUCCESS" {
+		t.Fatalf(
+			"unexpected response code: %s",
+			firstResponse.Code,
+		)
 	}
 
-	t.Logf("PASS: first request 201, job_id=%d", firstID)
+	firstID := firstResponse.Data.JobID
+
+	if firstID == 0 {
+		t.Fatal("first job_id is zero")
+	}
+
+	// 新任务必须处于 queued 状态
+	if firstResponse.Data.Status != model.ImportJobQueued {
+		t.Fatalf(
+			"expected queued, got %s",
+			firstResponse.Data.Status,
+		)
+	}
+
+	// 验证项目、仓库和版本关联
+	if firstResponse.Data.ProjectID != project.ID {
+		t.Fatal("project_id mismatch")
+	}
+
+	if firstResponse.Data.RepositoryID != repo.ID {
+		t.Fatal("repository_id mismatch")
+	}
+
+	if firstResponse.Data.RevisionSHA != revisionSHA {
+		t.Fatal("revision_sha mismatch")
+	}
+
+	t.Logf(
+		"PASS: first request 202, job_id=%d, status=queued",
+		firstID,
+	)
 
 	// ====================================================
-	// 场景二：重复请求 -> 200 + 相同 ID
+	// 场景二：重复请求 -> 200 + 相同 job_id
 	// ====================================================
 
 	retry := send(tokenA, "http-test-key-001", body)
@@ -238,11 +277,7 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		)
 	}
 
-	var retryResponse struct {
-		Data struct {
-			ID uint64 `json:"id"`
-		} `json:"data"`
-	}
+	var retryResponse importResponse
 
 	if err := json.Unmarshal(
 		retry.Body.Bytes(), &retryResponse,
@@ -250,15 +285,22 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if retryResponse.Data.ID != firstID {
+	if retryResponse.Data.JobID != firstID {
 		t.Fatalf(
-			"retry returned %d, want %d",
-			retryResponse.Data.ID,
+			"retry returned job_id=%d, want %d",
+			retryResponse.Data.JobID,
 			firstID,
 		)
 	}
 
-	t.Log("PASS: retry 200, same job ID")
+	if retryResponse.Data.Status != model.ImportJobQueued {
+		t.Fatalf(
+			"retry status = %s, want queued",
+			retryResponse.Data.Status,
+		)
+	}
+
+	t.Log("PASS: retry 200, same job_id")
 
 	// ====================================================
 	// 场景三：同 Key 不同 Payload -> 409
@@ -343,7 +385,7 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 	t.Log("PASS: foreign project returns 404")
 
 	// ====================================================
-	// 场景六：缺少幂等键 -> 400
+	// 场景六：缺少 Idempotency-Key -> 400
 	// ====================================================
 
 	missingKey := send(tokenA, "", body)
@@ -356,6 +398,38 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 	}
 
 	t.Log("PASS: missing key returns 400")
+
+	// ====================================================
+	// 场景七：确认数据库真正持久化了 queued 任务
+	// ====================================================
+
+	var persistedJob model.ImportJob
+
+	if err := tx.
+		Where("id = ? AND user_id = ?", firstID, userA.ID).
+		Take(&persistedJob).Error; err != nil {
+		t.Fatalf("query persisted job: %v", err)
+	}
+
+	if persistedJob.Status != model.ImportJobQueued {
+		t.Fatalf(
+			"persisted status = %s, want queued",
+			persistedJob.Status,
+		)
+	}
+
+	if persistedJob.AttemptCount != 0 {
+		t.Fatalf(
+			"attempt_count = %d, want 0",
+			persistedJob.AttemptCount,
+		)
+	}
+
+	if persistedJob.RevisionSHA != revisionSHA {
+		t.Fatal("persisted revision_sha mismatch")
+	}
+
+	t.Log("PASS: queued job persisted correctly")
 
 	// ====================================================
 	// 最终验证：数据库只有一条导入任务
@@ -375,7 +449,10 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 	}
 
 	if count != 1 {
-		t.Fatalf("expected 1 import job, got %d", count)
+		t.Fatalf(
+			"expected 1 import job, got %d",
+			count,
+		)
 	}
 
 	t.Log("PASS: database contains exactly 1 import job")
