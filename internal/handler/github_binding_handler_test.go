@@ -235,3 +235,11 @@ var _ RepositoryBinder = (*fakeRepositoryBinder)(nil)
 // 避免在错误映射测试中误以为任意非 nil 错误
 // 都属于 GitHub 上游错误。
 var _ = errors.Is
+
+func TestGitHubBindingRateLimitRetryAfter(t *testing.T) {
+	limit := &githubclient.RateLimitError{Kind: githubclient.PrimaryRateLimit, RetryAt: time.Now().Add(2 * time.Minute)}
+	rec := runGitHubBindingRequest(t, &fakeRepositoryBinder{err: limit}, 1, "1", `{"owner":"golang","repo":"go"}`)
+	if rec.Code != 503 || rec.Header().Get("Retry-After") == "" || !strings.Contains(rec.Body.String(), "GITHUB_RATE_LIMITED") {
+		t.Fatalf("status=%d header=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+}

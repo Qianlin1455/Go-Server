@@ -40,7 +40,7 @@ func (e ImportRequestedV1) Validate() error {
 	}
 
 	if e.SchemaVersion != ImportRequestedVersion {
-		return errors.New("unsupported event_version")
+		return errors.New("unsupported schema_version")
 	}
 
 	if e.OccurredAt.IsZero() {

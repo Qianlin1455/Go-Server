@@ -6,13 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -47,6 +49,9 @@ const (
 
 type Client struct {
 	httpClient *http.Client
+	token      string
+	cache      Cache
+	flights    singleflight.Group
 }
 
 type RepositoryInfo struct {
@@ -74,6 +79,7 @@ func NewClient() *Client {
 	transport.Proxy = nil
 
 	return &Client{
+		token: os.Getenv("GITHUB_TOKEN"),
 		httpClient: &http.Client{
 			Timeout:   5 * time.Second,
 			Transport: transport,
@@ -116,7 +122,7 @@ func classifyRequestError(err error) error {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return ErrTimeout
 	}
-	return fmt.Errorf("%w: %v", ErrUpstream, err)
+	return ErrUpstream
 }
 
 func (c *Client) doJSON(
@@ -143,29 +149,28 @@ func (c *Client) doJSON(
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-
-	start := time.Now()
-
-	resp, err := c.httpClient.Do(req)
-
-	if err != nil {
-		log.Printf(
-			"GitHub HTTP FAILED path=%s elapsed=%s ctx_err=%v err=%v",
-			path,
-			time.Since(start),
-			ctx.Err(),
-			err,
-		)
-		return classifyRequestError(err)
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
-	log.Printf(
-		"GitHub HTTP HEADERS path=%s status=%d elapsed=%s",
-		path,
-		resp.StatusCode,
-		time.Since(start),
-	)
-
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = c.httpClient.Do(req)
+		if err != nil {
+			return classifyRequestError(err)
+		}
+		if attempt > 0 || (resp.StatusCode != 502 && resp.StatusCode != 503 && resp.StatusCode != 504) || resp.Header.Get("Retry-After") != "" {
+			break
+		}
+		resp.Body.Close()
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return classifyRequestError(ctx.Err())
+		case <-timer.C:
+		}
+	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
@@ -175,15 +180,10 @@ func (c *Client) doJSON(
 	case http.StatusNotFound:
 		return ErrNotFound
 
-	case http.StatusTooManyRequests:
-		return ErrRateLimited
-
-	case http.StatusForbidden:
-		if resp.Header.Get("X-RateLimit-Remaining") == "0" ||
-			resp.Header.Get("Retry-After") != "" {
-			return ErrRateLimited
-		}
+	case http.StatusUnauthorized:
 		return ErrForbidden
+	case http.StatusTooManyRequests, http.StatusForbidden:
+		return classifyRateLimit(resp)
 
 	default:
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -212,7 +212,7 @@ func (c *Client) doJSON(
 	}
 
 	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("%w: %v", ErrBadResponse, err)
+		return ErrBadResponse
 	}
 
 	return nil
@@ -251,7 +251,7 @@ func (c *Client) getPublicMetadata(
 	return &metaData, nil
 }
 
-func (c *Client) GetPublicRepository(
+func (c *Client) fetchPublicRepository(
 	ctx context.Context,
 	owner, repo string,
 ) (*RepositoryInfo, error) {
@@ -322,3 +322,7 @@ func (c *Client) GetCommitSHA(
 
 	return strings.ToLower(commit.SHA), nil
 }
+
+// String and GoString keep credentials out of accidental debug formatting.
+func (c *Client) String() string   { return "githubclient.Client" }
+func (c *Client) GoString() string { return c.String() }

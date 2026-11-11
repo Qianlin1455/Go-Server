@@ -228,9 +228,16 @@ func main() {
 		evidenceService,
 	)
 
+	githubClient := githubclient.NewClient()
+	githubCache, err := cache.NewRedisCacheWithClient(redisClient, "go-server:v1", 100*time.Millisecond, githubclient.RepositoryCacheTTL)
+	if err != nil {
+		log.Print("GitHub cache initialization failed; using API directly")
+	} else {
+		githubClient = githubclient.NewClientWithCache(githubCache)
+	}
 	githubSvc := service.NewGitHubBindingService(
 		db,
-		githubclient.NewClient(),
+		githubClient,
 	)
 
 	githubHandler := handler.NewGitHubBindingHandler(

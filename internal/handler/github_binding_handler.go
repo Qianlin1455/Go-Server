@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -121,6 +122,10 @@ func writeGitHubBindingError(
 
 	case errors.Is(err, githubclient.ErrRateLimited):
 		status, code = http.StatusServiceUnavailable, "GITHUB_RATE_LIMITED"
+		var limit *githubclient.RateLimitError
+		if errors.As(err, &limit) {
+			c.Header("Retry-After", strconv.FormatInt(limit.RetryAfterSeconds(time.Now()), 10))
+		}
 
 	case errors.Is(err, githubclient.ErrTimeout),
 		errors.Is(err, context.DeadlineExceeded):
