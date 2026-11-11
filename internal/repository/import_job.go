@@ -21,8 +21,17 @@ func NewImportJobStore(db *gorm.DB) *ImportJobStore {
 	return &ImportJobStore{db: db}
 }
 
+var ErrInvalidCompleteJobArgs = errors.New(
+	"invalid complete job arguments",
+)
 var ErrInvalidClaimArgs = errors.New("invalid claim arguments")
+var ErrInvalidFailJobArgs = errors.New(
+	"invalid fail job arguments",
+)
 
+var failJobErrorCodePattern = regexp.MustCompile(
+	`^[A-Z][A-Z0-9_]{0,63}$`,
+)
 var workerIDPattern = regexp.MustCompile(
 	`^[A-Za-z0-9._:-]{1,128}$`,
 )
@@ -128,4 +137,220 @@ func (r *ImportJobStore) GetByIdempotency(
 	}
 
 	return &job, nil
+}
+
+// 查询当前可以领取的任务ID
+func (r *ImportJobStore) ListReadyQueuedJobIDs(
+	ctx context.Context,
+	limit int,
+) ([]uint64, error) {
+	if limit <= 0 || limit > 100 {
+		return nil, fmt.Errorf(
+			"invalid ready job limit:%d", limit,
+		)
+	}
+
+	var ids []uint64
+
+	err := r.db.WithContext(ctx).
+		Model(&model.ImportJob{}).
+		Where("status = ?", model.ImportJobQueued).
+		Where("available_at <= NOW(3)").
+		Where("attempt_count < max_attempts").
+		Order("available_at ASC, id ASC").
+		Limit(limit).
+		Pluck("id", &ids).Error
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list ready queued jobs:%w", err,
+		)
+	}
+	return ids, nil
+}
+
+// 回收租约已过期的任务
+func (r *ImportJobStore) RecoverExpiredJobs(
+	ctx context.Context,
+) (requeued int64, failed int64, err error) {
+	var requeuedCount int64
+	var failedCount int64
+
+	//两类回收操作放入事务中
+	err = r.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			//回收租约过期、仍可以重试的任务
+			result := tx.Model(&model.ImportJob{}).
+				Where("status = ? AND lease_expires_at <= NOW(3)", model.ImportJobRunning).
+				Where("attempt_count < max_attempts").
+				Updates(map[string]interface{}{
+					"status":           model.ImportJobQueued,
+					"available_at":     gorm.Expr("NOW(3)"),
+					"lease_owner":      nil,
+					"lease_token":      nil,
+					"lease_expires_at": nil,
+				})
+
+			if result.Error != nil {
+				return fmt.Errorf("requeue expired jobs:%w", result.Error)
+			}
+			requeuedCount = result.RowsAffected
+
+			//租约过期且重试次数已耗尽
+			result = tx.Model(&model.ImportJob{}).
+				Where(
+					"status = ? AND lease_expires_at <= NOW(3)",
+					model.ImportJobRunning,
+				).
+				Where("attempt_count >= max_attempts").
+				Updates(map[string]interface{}{
+					"status":           model.ImportJobFailed,
+					"finished_at":      gorm.Expr("NOW(3)"),
+					"last_error_code":  "MAX_ATTEMPTS_EXCEEDED",
+					"lease_owner":      nil,
+					"lease_token":      nil,
+					"lease_expires_at": nil,
+				})
+
+			if result.Error != nil {
+				return fmt.Errorf(
+					"fail expired jobs: %w",
+					result.Error,
+				)
+			}
+			failedCount = result.RowsAffected
+			return nil
+		},
+	)
+
+	if err != nil {
+		return 0, 0, fmt.Errorf("recover expired import jobs:%w", err)
+	}
+	return requeuedCount, failedCount, nil
+}
+
+// 只有持有有效租约的token的worker才能完成任务，completed = false 表示不满足完成条件
+func (r *ImportJobStore) CompleteJob(
+	ctx context.Context,
+	jobID uint64,
+	leaseToken []byte,
+) (completed bool, err error) {
+	//1、校验参数
+	if jobID == 0 || len(leaseToken) != 16 {
+		return false, ErrInvalidCompleteJobArgs
+	}
+
+	//2、CAS更新
+	result := r.db.WithContext(ctx).
+		Model(&model.ImportJob{}).
+		Where(
+			`id = ?
+             AND status = ?
+             AND lease_token = ?
+             AND lease_expires_at > NOW(3)`,
+			jobID,
+			model.ImportJobRunning,
+			leaseToken,
+		).
+		Updates(map[string]interface{}{
+			"status":             model.ImportJobSucceeded,
+			"finished_at":        gorm.Expr("NOW(3)"),
+			"lease_owner":        nil,
+			"lease_token":        nil,
+			"lease_expires_at":   nil,
+			"last_error_code":    nil,
+			"last_error_message": nil,
+		})
+	//数据库执行失败
+	if result.Error != nil {
+		return false, fmt.Errorf("complete import job:%w", result.Error)
+	}
+
+	//没有更新记录
+	if result.RowsAffected != 1 {
+		return false, nil
+	}
+	return true, nil
+
+}
+
+func (r *ImportJobStore) FailJob(
+	ctx context.Context,
+	jobID uint64,
+	leaseToken []byte,
+	errorCode string,
+) (updated bool, err error) {
+	//参数校验
+	if jobID == 0 ||
+		len(leaseToken) != 16 ||
+		!failJobErrorCodePattern.MatchString(errorCode) {
+		return false, ErrInvalidFailJobArgs
+	}
+	//尝试重新排队
+	result := r.db.WithContext(ctx).
+		Model(&model.ImportJob{}).
+		Where(
+			`id = ?
+             AND status = ?
+             AND lease_token = ?
+             AND lease_expires_at > NOW(3)
+             AND attempt_count < max_attempts`,
+			jobID,
+			model.ImportJobRunning,
+			leaseToken,
+		).
+		Updates(map[string]interface{}{
+			"status": model.ImportJobQueued,
+
+			// 5 秒后允许下一次领取
+			"available_at": gorm.Expr(
+				"DATE_ADD(NOW(3), INTERVAL 5 SECOND)",
+			),
+
+			"finished_at":        nil,
+			"lease_owner":        nil,
+			"lease_token":        nil,
+			"lease_expires_at":   nil,
+			"last_error_code":    errorCode,
+			"last_error_message": nil,
+		})
+	if result.RowsAffected == 1 {
+		return true, nil
+	}
+
+	// 3. 尝试标记为最终失败（次数耗尽）
+	result = r.db.WithContext(ctx).
+		Model(&model.ImportJob{}).
+		Where(
+			`id = ?
+             AND status = ?
+             AND lease_token = ?
+             AND lease_expires_at > NOW(3)
+             AND attempt_count >= max_attempts`,
+			jobID,
+			model.ImportJobRunning,
+			leaseToken,
+		).
+		Updates(map[string]interface{}{
+			"status": model.ImportJobFailed,
+
+			"finished_at": gorm.Expr("NOW(3)"),
+
+			"lease_owner":        nil,
+			"lease_token":        nil,
+			"lease_expires_at":   nil,
+			"last_error_code":    errorCode,
+			"last_error_message": nil,
+		})
+
+	if result.Error != nil {
+		return false, fmt.Errorf(
+			"fail import job: %w",
+			result.Error,
+		)
+	}
+	if result.RowsAffected == 1 {
+		return true, nil
+	}
+	return false, nil
 }

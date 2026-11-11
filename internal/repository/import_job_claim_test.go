@@ -115,6 +115,24 @@ func TestClaimQueuedJob_Concurrent50(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 验证 queued 任务能够被查询到
+	ids, err := store.ListReadyQueuedJobIDs(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, id := range ids {
+		if id == job.ID {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatal("queued job should be discoverable")
+	}
+
 	// 4. 同时启动 50 个领取操作
 	const workers = 50
 
