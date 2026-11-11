@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"GoServer/events"
 	"GoServer/internal/idempotency"
 	"GoServer/internal/model"
 	"GoServer/internal/repository"
@@ -91,6 +92,19 @@ func runImportJobConcurrent50(
 			5*time.Second,
 		)
 		defer cancel()
+
+		if user.ID != 0 && project.ID != 0 {
+			if err := db.WithContext(cleanupCtx).
+				Exec(`
+					DELETE FROM outbox_events
+					WHERE job_id IN (
+						SELECT id FROM import_jobs
+						WHERE user_id = ? AND project_id = ?
+					)
+				`, user.ID, project.ID).Error; err != nil {
+				t.Errorf("清理 outbox_events 失败: %v", err)
+			}
+		}
 
 		// 按外键依赖顺序删除
 		if user.ID != 0 && project.ID != 0 {
@@ -281,6 +295,27 @@ func runImportJobConcurrent50(
 	// ============================================================
 	// 8. 验证数据库只有一条记录
 	// ============================================================
+
+	var outboxCount int64
+
+	if err := db.Model(&model.OutboxEvent{}).
+		Where(
+			"job_id = ? AND event_type = ?",
+			firstID,
+			events.ImportRequestedType,
+		).
+		Count(&outboxCount).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("outbox rows: %d", outboxCount)
+
+	if outboxCount != 1 {
+		t.Errorf(
+			"expected 1 outbox event, got %d",
+			outboxCount,
+		)
+	}
 
 	var count int64
 

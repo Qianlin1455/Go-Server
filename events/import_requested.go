@@ -18,10 +18,10 @@ var commitSHAPattern = regexp.MustCompile(
 // ImportRequestedV1 描述导入任务创建事件。
 // 事件本身不执行任务，也不直接发送 Kafka。
 type ImportRequestedV1 struct {
-	EventID      string    `json:"event_id"`
-	EventType    string    `json:"event_type"`
-	EventVersion int       `json:"event_version"`
-	OccurredAt   time.Time `json:"occurred_at"`
+	EventID       string    `json:"event_id"`
+	EventType     string    `json:"event_type"`
+	SchemaVersion int       `json:"schema_version"`
+	OccurredAt    time.Time `json:"occurred_at"`
 
 	JobID        uint64 `json:"job_id"`
 	UserID       uint64 `json:"user_id"`
@@ -39,7 +39,7 @@ func (e ImportRequestedV1) Validate() error {
 		return errors.New("invalid event_type")
 	}
 
-	if e.EventVersion != ImportRequestedVersion {
+	if e.SchemaVersion != ImportRequestedVersion {
 		return errors.New("unsupported event_version")
 	}
 

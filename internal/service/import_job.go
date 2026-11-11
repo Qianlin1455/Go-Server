@@ -2,13 +2,17 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"regexp"
 	"time"
+
+	"GoServer/events"
 
 	"GoServer/internal/model"
 	"GoServer/internal/repository"
@@ -99,6 +103,82 @@ func isImportDuplicateKey(err error) bool {
 	}
 	var mysqlErr *mysql.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
+}
+
+// newOutboxEventID 生成 UUID v4。
+func newOutboxEventID() (string, error) {
+	var id [16]byte
+
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("generate event id: %w", err)
+	}
+
+	// UUID version 4
+	id[6] = (id[6] & 0x0f) | 0x40
+
+	// RFC 4122 variant
+	id[8] = (id[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf(
+		"%x-%x-%x-%x-%x",
+		id[0:4],
+		id[4:6],
+		id[6:8],
+		id[8:10],
+		id[10:16],
+	), nil
+}
+
+// buildImportRequestedOutbox 构造导入任务的 Outbox 事件。
+func buildImportRequestedOutbox(
+	job *model.ImportJob,
+) (*model.OutboxEvent, error) {
+	if job == nil || job.ID == 0 {
+		return nil, errors.New("invalid import job")
+	}
+
+	eventID, err := newOutboxEventID()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+
+	// 1. 构造事件传输结构
+	message := events.ImportRequestedV1{
+		EventID:       eventID,
+		EventType:     events.ImportRequestedType,
+		SchemaVersion: events.ImportRequestedVersion,
+		OccurredAt:    now,
+		JobID:         job.ID,
+		UserID:        job.UserID,
+		ProjectID:     job.ProjectID,
+		RepositoryID:  job.RepositoryID,
+		RevisionSHA:   job.RevisionSHA,
+	}
+
+	// 2. 验证事件
+	if err := message.Validate(); err != nil {
+		return nil, fmt.Errorf("validate import event: %w", err)
+	}
+
+	// 3. 序列化 JSON
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("marshal import event: %w", err)
+	}
+
+	// 4. 构造数据库持久化模型
+	return &model.OutboxEvent{
+		EventID:       eventID,
+		JobID:         job.ID,
+		EventType:     events.ImportRequestedType,
+		RevisionSHA:   job.RevisionSHA,
+		SchemaVersion: uint32(events.ImportRequestedVersion),
+		Payload:       string(payload),
+		Status:        model.OutboxPending,
+		Attempts:      0,
+	}, nil
 }
 
 func (s *ImportJobService) CreateImportJob(
@@ -236,7 +316,12 @@ func (s *ImportJobService) CreateImportJob(
 		Status:             model.ImportJobQueued,
 	}
 
-	err = s.jobs.Create(ctx, job)
+	err = s.jobs.CreateWithOutbox(
+		ctx,
+		job,
+		buildImportRequestedOutbox,
+	)
+
 	if err == nil {
 		return job, true, nil
 	}

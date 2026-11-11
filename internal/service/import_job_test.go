@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"GoServer/events"
 	"GoServer/internal/model"
 	"GoServer/internal/repository"
 )
@@ -127,4 +129,129 @@ func TestCreateImportJob_Idempotency(t *testing.T) {
 	}
 
 	t.Log("PASS: different key created a separate job")
+}
+
+func TestCreateWithOutbox_OutboxInsertFailureRollsBackJob(t *testing.T) {
+	ctx := context.Background()
+	tx := newGitHubBindingTestTx(t)
+
+	user, project := createBindingTestProject(t, tx)
+
+	repo := &model.Repository{
+		ProjectID:     project.ID,
+		Owner:         "golang",
+		Repo:          "go",
+		DefaultBranch: "master",
+		LastSHA:       testCommitSHA,
+	}
+
+	if err := repository.NewGitHubRepositoryStore(tx).
+		Create(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	store := repository.NewImportJobStore(tx)
+
+	// 1. 创建一个基准 Job
+	seedJob := &model.ImportJob{
+		UserID:             user.ID,
+		ProjectID:          project.ID,
+		RepositoryID:       repo.ID,
+		Endpoint:           ImportCreateEndpoint,
+		IdempotencyKey:     "outbox-seed",
+		RequestFingerprint: strings.Repeat("a", 64),
+		RevisionSHA:        testCommitSHA,
+		Status:             model.ImportJobQueued,
+		MaxAttempts:        3,
+	}
+
+	if err := store.Create(ctx, seedJob); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. 创建基准 Outbox 事件
+	seedEvent := &model.OutboxEvent{
+		EventID:       "550e8400-e29b-41d4-a716-446655440000",
+		JobID:         seedJob.ID,
+		EventType:     events.ImportRequestedType,
+		RevisionSHA:   testCommitSHA,
+		SchemaVersion: 1,
+		Payload:       `{}`,
+		Status:        model.OutboxPending,
+	}
+
+	if err := repository.NewOutboxEventStore(tx).
+		Create(ctx, seedEvent); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. 准备第二个 Job
+	candidateJob := &model.ImportJob{
+		UserID:             user.ID,
+		ProjectID:          project.ID,
+		RepositoryID:       repo.ID,
+		Endpoint:           ImportCreateEndpoint,
+		IdempotencyKey:     "outbox-rollback",
+		RequestFingerprint: strings.Repeat("b", 64),
+		RevisionSHA:        testCommitSHA,
+		Status:             model.ImportJobQueued,
+		MaxAttempts:        3,
+	}
+
+	// 4. 故意使用已经存在的 event_id
+	err := store.CreateWithOutbox(
+		ctx,
+		candidateJob,
+		func(job *model.ImportJob) (*model.OutboxEvent, error) {
+			return &model.OutboxEvent{
+				EventID:       seedEvent.EventID,
+				JobID:         job.ID,
+				EventType:     events.ImportRequestedType,
+				RevisionSHA:   job.RevisionSHA,
+				SchemaVersion: 1,
+				Payload:       `{}`,
+				Status:        model.OutboxPending,
+			}, nil
+		},
+	)
+
+	if err == nil {
+		t.Fatal("expected duplicate event_id error")
+	}
+
+	t.Logf("PASS: duplicate event_id rejected: %v", err)
+
+	// 5. 验证第二个 Job 已回滚
+	var jobCount int64
+
+	if err := tx.Model(&model.ImportJob{}).
+		Where(
+			"user_id = ? AND endpoint = ? AND idempotency_key = ?",
+			user.ID,
+			ImportCreateEndpoint,
+			"outbox-rollback",
+		).
+		Count(&jobCount).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if jobCount != 0 {
+		t.Fatalf("expected 0 candidate jobs, got %d", jobCount)
+	}
+
+	// 6. 验证基准事件仍然存在
+	var eventCount int64
+
+	if err := tx.Model(&model.OutboxEvent{}).
+		Where("event_id = ?", seedEvent.EventID).
+		Count(&eventCount).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if eventCount != 1 {
+		t.Fatalf("expected original event to remain, got %d", eventCount)
+	}
+
+	t.Log("PASS: import_job rolled back")
+	t.Log("PASS: original outbox event preserved")
 }

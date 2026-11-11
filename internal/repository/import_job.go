@@ -114,6 +114,53 @@ func (r *ImportJobStore) Create(
 		Create(job).Error
 }
 
+var ErrInvalidCreateWithOutboxArgs = errors.New(
+	"invalid create import job with outbox arguments",
+)
+
+// CreateWithOutbox 在同一个 MySQL 事务中创建 ImportJob 和 OutboxEvent。
+//
+// buildEvent 在 ImportJob 插入成功后执行，
+// 此时 job.ID 已经由 MySQL 回填。
+func (r *ImportJobStore) CreateWithOutbox(
+	ctx context.Context,
+	job *model.ImportJob,
+	buildEvent func(
+		job *model.ImportJob,
+	) (*model.OutboxEvent, error),
+) error {
+	if job == nil || buildEvent == nil {
+		return ErrInvalidCreateWithOutboxArgs
+	}
+
+	return r.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			// 1. 创建业务任务
+			if err := tx.Create(job).Error; err != nil {
+				return err
+			}
+
+			// 2. 根据已生成的 Job ID 构造事件
+			event, err := buildEvent(job)
+			if err != nil {
+				return err
+			}
+
+			if event == nil || event.JobID != job.ID {
+				return ErrInvalidCreateWithOutboxArgs
+			}
+
+			// 3. 创建 Outbox 事件
+			if err := NewOutboxEventStore(tx).
+				Create(ctx, event); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	)
+}
+
 // GetByIdempotency 根据幂等作用域查询已有任务。
 func (r *ImportJobStore) GetByIdempotency(
 	ctx context.Context,
