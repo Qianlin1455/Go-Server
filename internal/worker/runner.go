@@ -53,6 +53,13 @@ type JobStore interface {
 		leaseToken []byte,
 		errorCode string,
 	) (bool, error)
+
+	FailJobPermanently(
+		ctx context.Context,
+		jobID uint64,
+		leaseToken []byte,
+		errorCode string,
+	) (bool, error)
 }
 
 // Executor 定义实际任务执行行为。
@@ -323,25 +330,46 @@ func (r *Runner) executeClaimed(
 		return nil
 	}
 
-	// 4. 业务执行失败
-	errorCode := "EXECUTION_FAILED"
+	// 4. 业务执行失败：区分可重试和永久错误
 
-	if errors.Is(execErr, context.DeadlineExceeded) {
-		errorCode = "TASK_TIMEOUT"
+	// 独立取消不属于普通业务失败。
+	// 父 Context 未取消时，也不能把它当作永久失败。
+	if errors.Is(execErr, context.Canceled) {
+		return fmt.Errorf(
+			"execute job %d canceled: %w",
+			jobID,
+			execErr,
+		)
 	}
 
-	updated, err := r.store.FailJob(
-		finishCtx,
-		jobID,
-		token,
-		errorCode,
-	)
+	errorCode, permanent := classifyExecutionError(execErr)
 
-	if err != nil {
-		return fmt.Errorf(
-			"fail job %d: %w",
+	var updated bool
+	var updateErr error
+
+	if permanent {
+		// 永久错误：直接进入 failed
+		updated, updateErr = r.store.FailJobPermanently(
+			finishCtx,
 			jobID,
-			err,
+			token,
+			errorCode,
+		)
+	} else {
+		// 临时错误：重新排队，等待下一次重试
+		updated, updateErr = r.store.FailJob(
+			finishCtx,
+			jobID,
+			token,
+			errorCode,
+		)
+	}
+
+	if updateErr != nil {
+		return fmt.Errorf(
+			"update job %d failure state: %w",
+			jobID,
+			updateErr,
 		)
 	}
 
@@ -353,11 +381,22 @@ func (r *Runner) executeClaimed(
 		return nil
 	}
 
-	log.Printf(
-		"job=%d execution failed: %v",
-		jobID,
-		execErr,
-	)
+	if permanent {
+		log.Printf(
+			"job=%d permanently failed: code=%s err=%v",
+			jobID,
+			errorCode,
+			execErr,
+		)
+	} else {
+		log.Printf(
+			"job=%d retry scheduled: code=%s err=%v",
+			jobID,
+			errorCode,
+			execErr,
+		)
+	}
 
 	return nil
+
 }

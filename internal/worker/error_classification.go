@@ -17,9 +17,11 @@ func classifyExecutionError(err error) (string, bool) {
 	case errors.Is(err, githubclient.ErrRateLimited):
 		return "GITHUB_RATE_LIMITED", false
 
-	case errors.Is(err, githubclient.ErrTimeout),
-		errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, githubclient.ErrTimeout):
 		return "GITHUB_TIMEOUT", false
+
+	case errors.Is(err, context.DeadlineExceeded):
+		return "TASK_TIMEOUT", false
 
 	case errors.Is(err, githubclient.ErrUpstream):
 		return "GITHUB_UPSTREAM", false

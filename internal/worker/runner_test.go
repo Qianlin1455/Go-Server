@@ -11,10 +11,11 @@ import (
 
 // 使用 Fake Store 代替真实 MySQL
 type fakeJobStore struct {
-	claimCount    int
-	completeCount int
-	failCount     int
-	lastErrorCode string
+	claimCount         int
+	completeCount      int
+	failCount          int
+	lastErrorCode      string
+	permanentFailCount int
 
 	// 记录 Runner 传递过来的业务结果
 	completeResult model.ImportJobResult
@@ -27,6 +28,17 @@ func (f *fakeJobStore) RecoverExpiredJobs(
 	ctx context.Context,
 ) (int64, int64, error) {
 	return 0, 0, nil
+}
+
+func (f *fakeJobStore) FailJobPermanently(
+	ctx context.Context,
+	jobID uint64,
+	token []byte,
+	errorCode string,
+) (bool, error) {
+	f.permanentFailCount++
+	f.lastErrorCode = errorCode
+	return true, nil
 }
 
 func (f *fakeJobStore) ListReadyQueuedJobIDs(
