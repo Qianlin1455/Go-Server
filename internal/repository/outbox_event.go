@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"GoServer/internal/model"
@@ -11,6 +12,10 @@ import (
 )
 
 var (
+	ErrInvalidGetOutboxEventArgs = errors.New(
+		"invalid get outbox event arguments",
+	)
+
 	ErrInvalidOutboxEvent = errors.New(
 		"invalid outbox event",
 	)
@@ -133,4 +138,31 @@ func truncateOutboxError(message string, max int) string {
 	}
 
 	return string(runes[:max])
+}
+
+// GetByEventID 根据事件 ID 查询 Outbox 事件。
+// 用于 Consumer 验证 Kafka 消息是否来自真实的 Outbox 记录。
+func (r *OutboxEventStore) GetByEventID(
+	ctx context.Context,
+	eventID string,
+) (*model.OutboxEvent, error) {
+	if eventID == "" {
+		return nil, ErrInvalidGetOutboxEventArgs
+	}
+
+	var event model.OutboxEvent
+
+	err := r.db.WithContext(ctx).
+		Where("event_id = ?", eventID).
+		Take(&event).Error
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get outbox event by event id %s: %w",
+			eventID,
+			err,
+		)
+	}
+
+	return &event, nil
 }
