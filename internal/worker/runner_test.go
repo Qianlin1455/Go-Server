@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"GoServer/internal/githubclient"
 	"GoServer/internal/model"
 )
 
@@ -417,4 +418,52 @@ func TestRunner_Shutdown(t *testing.T) {
 	t.Log(
 		"PASS: Worker 主动退出，未提交任务结果，等待 Lease 恢复",
 	)
+}
+
+func TestRunner_PermanentFailure(t *testing.T) {
+	store := &fakeJobStore{}
+
+	executor := ExecutorFunc(func(
+		ctx context.Context,
+		jobID uint64,
+	) (model.ImportJobResult, error) {
+		return model.ImportJobResult{}, githubclient.ErrNotFound
+	})
+
+	runner, err := NewRunner(
+		store,
+		executor,
+		"worker-A",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if store.permanentFailCount != 1 {
+		t.Fatalf(
+			"permanentFailCount=%d, want 1",
+			store.permanentFailCount,
+		)
+	}
+
+	if store.failCount != 0 {
+		t.Fatal("永久错误不能调用普通 FailJob")
+	}
+
+	if store.completeCount != 0 {
+		t.Fatal("永久错误不能标记成功")
+	}
+
+	if store.lastErrorCode != "GITHUB_NOT_FOUND" {
+		t.Fatalf(
+			"errorCode=%s, want GITHUB_NOT_FOUND",
+			store.lastErrorCode,
+		)
+	}
+
+	t.Log("PASS: 永久错误直接进入 failed，不再重试")
 }
