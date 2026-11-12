@@ -131,13 +131,14 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // RunOnce 执行一轮任务回收、扫描和领取。
+
 func (r *Runner) RunOnce(ctx context.Context) error {
-	// 1. 创建数据库扫描 Context
 	scanCtx, cancel := context.WithTimeout(
-		ctx, scanTimeout,
+		ctx,
+		scanTimeout,
 	)
 
-	// 2. 回收过期任务
+	// 1. 回收过期任务
 	requeued, failed, err := r.store.RecoverExpiredJobs(scanCtx)
 	if err != nil {
 		cancel()
@@ -147,13 +148,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	if requeued > 0 || failed > 0 {
 		log.Printf(
 			"recovered: requeued=%d failed=%d",
-			requeued, failed,
+			requeued,
+			failed,
 		)
 	}
 
-	// 3. 查询可领取任务
+	// 2. 扫描可领取任务
 	ids, err := r.store.ListReadyQueuedJobIDs(
-		scanCtx, scanLimit,
+		scanCtx,
+		scanLimit,
 	)
 	cancel()
 
@@ -161,43 +164,87 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("list ready jobs: %w", err)
 	}
 
-	// 4. 逐个尝试 CAS 领取
+	// 3. 将具体任务交给统一执行入口
 	for _, jobID := range ids {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		claimCtx, claimCancel := context.WithTimeout(
-			ctx, claimTimeout,
-		)
-
-		token, claimed, err := r.store.ClaimQueuedJob(
-			claimCtx,
-			jobID,
-			r.workerID,
-			leaseDuration,
-		)
-		claimCancel()
-
+		claimed, err := r.ProcessJob(ctx, jobID)
 		if err != nil {
-			return fmt.Errorf("claim job %d: %w", jobID, err)
+			return err
 		}
 
-		if !claimed {
-			// 可能被其他 Worker 抢先领取
-			continue
+		if claimed {
+			// 单 Worker 每轮最多处理一个任务
+			return nil
 		}
 
-		log.Printf(
-			"worker=%s claimed job=%d",
-			r.workerID, jobID,
-		)
-
-		// 一次只执行一个任务
-		return r.executeClaimed(ctx, jobID, token)
+		// CAS 领取失败，尝试下一个任务
 	}
 
 	return nil
+}
+
+// ProcessJob 执行指定 Job。
+// 返回 claimed=false 表示本次没有成功取得任务 Lease。
+// 返回 claimed=true 表示已取得 Lease，任务处理流程已执行。
+func (r *Runner) ProcessJob(
+	ctx context.Context,
+	jobID uint64,
+) (bool, error) {
+	if jobID == 0 {
+		return false, errors.New("invalid job id")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	// 1. CAS 领取指定任务
+	claimCtx, claimCancel := context.WithTimeout(
+		ctx,
+		claimTimeout,
+	)
+
+	token, claimed, err := r.store.ClaimQueuedJob(
+		claimCtx,
+		jobID,
+		r.workerID,
+		leaseDuration,
+	)
+
+	claimCancel()
+
+	if err != nil {
+		return false, fmt.Errorf(
+			"claim job %d: %w",
+			jobID,
+			err,
+		)
+	}
+
+	if !claimed {
+		log.Printf(
+			"worker=%s skipped job=%d: claim rejected",
+			r.workerID,
+			jobID,
+		)
+		return false, nil
+	}
+
+	log.Printf(
+		"worker=%s claimed job=%d",
+		r.workerID,
+		jobID,
+	)
+
+	// 2. 执行任务并持久化结果
+	if err := r.executeClaimed(ctx, jobID, token); err != nil {
+		return true, err
+	}
+
+	return true, nil
 }
 
 // executeClaimed 执行已经成功领取的任务。

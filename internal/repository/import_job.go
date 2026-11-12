@@ -34,6 +34,9 @@ var ErrInvalidClaimArgs = errors.New("invalid claim arguments")
 var ErrInvalidFailJobArgs = errors.New(
 	"invalid fail job arguments",
 )
+var ErrInvalidGetJobArgs = errors.New(
+	"invalid get import job arguments",
+)
 
 var ErrInvalidCompleteJobResult = errors.New(
 	"invalid complete job result",
@@ -226,6 +229,24 @@ func (r *ImportJobStore) ListReadyQueuedJobIDs(
 	return ids, nil
 }
 
+func (r *ImportJobStore) GetByID(
+	ctx context.Context,
+	jobID uint64,
+) (*model.ImportJob, error) {
+	if jobID == 0 {
+		return nil, ErrInvalidGetJobArgs
+	}
+	var job model.ImportJob
+
+	err := r.db.WithContext(ctx).First(&job, jobID).Error
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get import job %d:%w", jobID, err,
+		)
+	}
+	return &job, nil
+}
+
 // 回收租约已过期的任务
 func (r *ImportJobStore) RecoverExpiredJobs(
 	ctx context.Context,
@@ -371,6 +392,13 @@ func (r *ImportJobStore) FailJob(
 			"last_error_code":    errorCode,
 			"last_error_message": nil,
 		})
+	if result.Error != nil {
+		return false, fmt.Errorf(
+			"requeue import job: %w",
+			result.Error,
+		)
+	}
+
 	if result.RowsAffected == 1 {
 		return true, nil
 	}
@@ -454,4 +482,48 @@ func (r *ImportJobStore) CompleteJobWithResult(
 		)
 	}
 	return dbResult.RowsAffected == 1, nil
+}
+
+func (r *ImportJobStore) FailJobPermanently(
+	ctx context.Context,
+	jobID uint64,
+	leaseToken []byte,
+	errorCode string,
+) (bool, error) {
+	if jobID == 0 || len(leaseToken) != 16 ||
+		!failJobErrorCodePattern.MatchString(errorCode) {
+		return false, ErrInvalidFailJobArgs
+	}
+
+	//CAS更新：只有持有有效的lease的worker才能标记为永久失败
+	result := r.db.WithContext(ctx).
+		Model(&model.ImportJob{}).
+		Where(
+			`id = ?
+			 AND status = ?
+			 AND lease_token = ?
+			 AND lease_expires_at > NOW(3)`,
+			jobID,
+			model.ImportJobRunning,
+			leaseToken,
+		).
+		Updates(map[string]any{
+			"status":      model.ImportJobFailed,
+			"finished_at": gorm.Expr("NOW(3)"),
+
+			"last_error_code":    errorCode,
+			"last_error_message": nil,
+
+			"lease_owner":      nil,
+			"lease_token":      nil,
+			"lease_expires_at": nil,
+		})
+
+	if result.Error != nil {
+		return false, fmt.Errorf(
+			"fail import job permanently:%w", result.Error,
+		)
+	}
+
+	return result.RowsAffected == 1, nil
 }
