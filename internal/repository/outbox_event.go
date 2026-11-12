@@ -110,7 +110,7 @@ func (r *OutboxEventStore) MarkPublishFailed(
 			"id = ? AND status = ?",
 			id, model.OutboxPending,
 		).Updates(map[string]any{
-		"attemps":    gorm.Expr("attempts+1"),
+		"attempts":   gorm.Expr("attempts+1"),
 		"last_error": message,
 	})
 
