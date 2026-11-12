@@ -237,53 +237,175 @@ func TestTwoWorkers_ClaimAndCrashRecovery(t *testing.T) {
 
 	t.Log("PASS: expired job recovered to queued")
 
+	var state struct {
+		Status        string
+		AttemptCount  uint16
+		MaxAttempts   uint16
+		AvailableAt   time.Time
+		DBNow         time.Time `gorm:"column:db_now"`
+		TimeReady     int       `gorm:"column:time_ready"`
+		AttemptsReady int       `gorm:"column:attempts_ready"`
+	}
+
+	err = adminDB.Raw(`
+		SELECT
+			status,
+			attempt_count,
+			max_attempts,
+			available_at,
+			NOW(3) AS db_now,
+			(available_at <= NOW(3)) AS time_ready,
+			(attempt_count < max_attempts) AS attempts_ready
+		FROM import_jobs
+		WHERE id = ?
+	`, job.ID).Scan(&state).Error
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf(
+		"DEBUG: status=%s attempts=%d/%d available_at=%v db_now=%v time_ready=%d attempts_ready=%d",
+		state.Status,
+		state.AttemptCount,
+		state.MaxAttempts,
+		state.AvailableAt,
+		state.DBNow,
+		state.TimeReady,
+		state.AttemptsReady,
+	)
+
 	// 阶段 3：存活 Worker 重新领取
-	newToken, claimed, err := survivor.store.ClaimQueuedJob(
+	// 只允许领取一次
+	debugStore := NewImportJobStore(survivor.db.Debug())
+
+	newToken, claimed, err := debugStore.ClaimQueuedJob(
 		ctx,
 		job.ID,
 		survivor.name,
 		30*time.Second,
 	)
-	if err != nil || !claimed {
-		t.Fatalf("reclaim failed: %v", err)
+
+	if err != nil {
+		t.Fatalf("reclaim returned error: %v", err)
+	}
+
+	if !claimed {
+		t.Fatal("reclaim returned claimed=false")
+	}
+
+	if len(newToken) != 16 {
+		t.Fatalf("new token length=%d, want 16", len(newToken))
 	}
 
 	if bytes.Equal(winner.token, newToken) {
 		t.Fatal("new claim must have a different token")
 	}
 
-	// 旧 Token 不能完成任务
-	completed, err := survivor.store.CompleteJob(
-		ctx, job.ID, winner.token,
+	t.Logf(
+		"PASS: survivor=%s reclaimed job with new token",
+		survivor.name,
 	)
-	if err != nil || completed {
-		t.Fatalf(
-			"stale token accepted: %v, %v",
-			completed, err,
-		)
+
+	result := model.ImportJobResult{
+		TreeSHA:    "abcdef0123456789abcdef0123456789abcdef01",
+		FileCount:  10,
+		TotalBytes: 1024,
 	}
 
-	// 新 Token 可以完成
-	completed, err = survivor.store.CompleteJob(
-		ctx, job.ID, newToken,
+	// 阶段 4：旧 Token 不能提交结果
+	completed, err := survivor.store.CompleteJobWithResult(
+		ctx,
+		job.ID,
+		winner.token,
+		result,
 	)
-	if err != nil || !completed {
-		t.Fatalf("new owner cannot complete: %v", err)
+
+	if err != nil {
+		t.Fatalf("stale token completion error: %v", err)
 	}
 
+	if completed {
+		t.Fatal("stale token must not complete job")
+	}
+
+	// 验证旧 Token 没有污染任务
 	got = model.ImportJob{}
+
 	if err := adminDB.First(&got, job.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 
-	if got.Status != model.ImportJobSucceeded ||
-		got.AttemptCount != 2 {
+	if got.Status != model.ImportJobRunning {
+		t.Fatalf("status=%s, want running", got.Status)
+	}
+
+	if got.ResultTreeSHA != nil ||
+		got.ResultFileCount != nil ||
+		got.ResultTotalBytes != nil {
+		t.Fatal("stale token modified job result")
+	}
+
+	if !bytes.Equal(got.LeaseToken, newToken) {
+		t.Fatal("new lease token should remain unchanged")
+	}
+
+	t.Log("PASS: stale token rejected without side effects")
+
+	// 阶段 5：新 Token 提交业务结果
+	completed, err = survivor.store.CompleteJobWithResult(
+		ctx,
+		job.ID,
+		newToken,
+		result,
+	)
+
+	if err != nil {
+		t.Fatalf("new worker completion error: %v", err)
+	}
+
+	if !completed {
+		t.Fatal("new worker should complete job successfully")
+	}
+
+	// 阶段 6：验证最终数据库状态
+	got = model.ImportJob{}
+
+	if err := adminDB.First(&got, job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Status != model.ImportJobSucceeded {
 		t.Fatalf(
-			"final state: status=%s attempts=%d",
-			got.Status, got.AttemptCount,
+			"status=%s, want succeeded",
+			got.Status,
 		)
 	}
 
-	t.Log("PASS: stale token rejected")
-	t.Log("PASS: new worker completed recovered job")
+	if got.AttemptCount != 2 {
+		t.Fatalf(
+			"attempt_count=%d, want 2",
+			got.AttemptCount,
+		)
+	}
+
+	if got.ResultTreeSHA == nil ||
+		*got.ResultTreeSHA != result.TreeSHA {
+		t.Fatal("result tree SHA not persisted")
+	}
+
+	if got.ResultFileCount == nil ||
+		*got.ResultFileCount != result.FileCount {
+		t.Fatal("result file count not persisted")
+	}
+
+	if got.ResultTotalBytes == nil ||
+		*got.ResultTotalBytes != result.TotalBytes {
+		t.Fatal("result total bytes not persisted")
+	}
+
+	assertLeaseCleared(t, got)
+
+	t.Log("PASS: new worker persisted result successfully")
+	t.Log("PASS: completed job has correct result and cleared lease")
 }
