@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"GoServer/internal/model"
 )
 
 // 第一版配置：单 Worker 串行执行任务
@@ -38,10 +40,11 @@ type JobStore interface {
 		leaseDuration time.Duration,
 	) ([]byte, bool, error)
 
-	CompleteJob(
+	CompleteJobWithResult(
 		ctx context.Context,
 		jobID uint64,
 		leaseToken []byte,
+		result model.ImportJobResult,
 	) (bool, error)
 
 	FailJob(
@@ -55,19 +58,22 @@ type JobStore interface {
 // Executor 定义实际任务执行行为。
 // 后续由 GitHub 导入业务实现。
 type Executor interface {
-	Execute(ctx context.Context, jobID uint64) error
+	Execute(
+		ctx context.Context,
+		jobID uint64,
+	) (model.ImportJobResult, error)
 }
 
 // ExecutorFunc 便于在测试中注入模拟执行器。
 type ExecutorFunc func(
 	ctx context.Context,
 	jobID uint64,
-) error
+) (model.ImportJobResult, error)
 
 func (f ExecutorFunc) Execute(
 	ctx context.Context,
 	jobID uint64,
-) error {
+) (model.ImportJobResult, error) {
 	return f(ctx, jobID)
 }
 
@@ -205,8 +211,8 @@ func (r *Runner) executeClaimed(
 		ctx, taskTimeout,
 	)
 
-	// 真正的业务逻辑由 Executor 提供
-	execErr := r.executor.Execute(taskCtx, jobID)
+	// Executor 返回业务结果和错误
+	result, execErr := r.executor.Execute(taskCtx, jobID)
 
 	// 必须在 cancel() 之前读取状态
 	taskErr := taskCtx.Err()
@@ -215,6 +221,7 @@ func (r *Runner) executeClaimed(
 	if taskErr != nil {
 		execErr = taskErr
 	}
+
 	// Worker 主动关闭时，不提交成功或失败状态。
 	// 保留 running，等待 Lease 到期后由其他 Worker 回收。
 	if ctx.Err() != nil {
@@ -234,14 +241,21 @@ func (r *Runner) executeClaimed(
 	)
 	defer finishCancel()
 
-	// 3. 业务执行成功
+	// 3. 业务执行成功：持久化结果并完成任务
 	if execErr == nil {
-		completed, err := r.store.CompleteJob(
-			finishCtx, jobID, token,
+		completed, err := r.store.CompleteJobWithResult(
+			finishCtx,
+			jobID,
+			token,
+			result,
 		)
 
 		if err != nil {
-			return fmt.Errorf("complete job %d: %w", jobID, err)
+			return fmt.Errorf(
+				"complete job %d with result: %w",
+				jobID,
+				err,
+			)
 		}
 
 		if !completed {
@@ -252,7 +266,13 @@ func (r *Runner) executeClaimed(
 			return nil
 		}
 
-		log.Printf("job=%d succeeded", jobID)
+		log.Printf(
+			"job=%d succeeded: tree_sha=%s files=%d bytes=%d",
+			jobID,
+			result.TreeSHA,
+			result.FileCount,
+			result.TotalBytes,
+		)
 		return nil
 	}
 
@@ -271,7 +291,11 @@ func (r *Runner) executeClaimed(
 	)
 
 	if err != nil {
-		return fmt.Errorf("fail job %d: %w", jobID, err)
+		return fmt.Errorf(
+			"fail job %d: %w",
+			jobID,
+			err,
+		)
 	}
 
 	if !updated {
@@ -284,7 +308,8 @@ func (r *Runner) executeClaimed(
 
 	log.Printf(
 		"job=%d execution failed: %v",
-		jobID, execErr,
+		jobID,
+		execErr,
 	)
 
 	return nil

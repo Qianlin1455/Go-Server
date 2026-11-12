@@ -5,15 +5,19 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"GoServer/internal/model"
 )
 
 // 使用 Fake Store 代替真实 MySQL
-
 type fakeJobStore struct {
 	claimCount    int
 	completeCount int
 	failCount     int
 	lastErrorCode string
+
+	// 记录 Runner 传递过来的业务结果
+	completeResult model.ImportJobResult
 
 	rejectClaim    bool
 	rejectComplete bool
@@ -38,7 +42,6 @@ func (f *fakeJobStore) ClaimQueuedJob(
 	workerID string,
 	leaseDuration time.Duration,
 ) ([]byte, bool, error) {
-
 	f.claimCount++
 
 	if f.rejectClaim {
@@ -48,13 +51,15 @@ func (f *fakeJobStore) ClaimQueuedJob(
 	return make([]byte, 16), true, nil
 }
 
-func (f *fakeJobStore) CompleteJob(
+// CompleteJobWithResult 模拟结果持久化。
+func (f *fakeJobStore) CompleteJobWithResult(
 	ctx context.Context,
 	jobID uint64,
 	token []byte,
+	result model.ImportJobResult,
 ) (bool, error) {
-
 	f.completeCount++
+	f.completeResult = result
 
 	if f.rejectComplete {
 		return false, nil
@@ -74,22 +79,28 @@ func (f *fakeJobStore) FailJob(
 	return true, nil
 }
 
-// 测试一：执行成功
+// 测试一：执行成功，且业务结果正确传递到 Store。
 func TestRunner_Success(t *testing.T) {
 	store := &fakeJobStore{}
 	executeCount := 0
 
+	expectedResult := model.ImportJobResult{
+		TreeSHA:    "0123456789abcdef0123456789abcdef01234567",
+		FileCount:  10,
+		TotalBytes: 1024,
+	}
+
 	executor := ExecutorFunc(func(
 		ctx context.Context,
 		jobID uint64,
-	) error {
+	) (model.ImportJobResult, error) {
 		executeCount++
 
 		if jobID != 101 {
 			t.Fatalf("unexpected job ID: %d", jobID)
 		}
 
-		return nil
+		return expectedResult, nil
 	})
 
 	runner, err := NewRunner(
@@ -117,18 +128,28 @@ func TestRunner_Success(t *testing.T) {
 		)
 	}
 
-	t.Log("PASS: 领取、执行、完成流程正确")
+	// 核心断言：Executor 返回的结果必须传递给 Store。
+	if store.completeResult != expectedResult {
+		t.Fatalf(
+			"complete result mismatch: got %+v, want %+v",
+			store.completeResult,
+			expectedResult,
+		)
+	}
+
+	t.Log("PASS: 领取、执行、结果传递、完成流程正确")
 }
 
-// 测试二：执行失败
+// 测试二：执行失败。
 func TestRunner_Failure(t *testing.T) {
 	store := &fakeJobStore{}
 
 	executor := ExecutorFunc(func(
 		ctx context.Context,
 		jobID uint64,
-	) error {
-		return errors.New("simulated github failure")
+	) (model.ImportJobResult, error) {
+		return model.ImportJobResult{},
+			errors.New("simulated github failure")
 	})
 
 	runner, err := NewRunner(
@@ -148,7 +169,7 @@ func TestRunner_Failure(t *testing.T) {
 	}
 
 	if store.completeCount != 0 {
-		t.Fatal("执行失败不能调用 CompleteJob")
+		t.Fatal("执行失败不能调用 CompleteJobWithResult")
 	}
 
 	if store.failCount != 1 {
@@ -165,8 +186,8 @@ func TestRunner_Failure(t *testing.T) {
 	t.Log("PASS: 执行失败正确调用 FailJob")
 }
 
+// 测试三：领取失败，不执行任务。
 func TestRunner_ClaimRejected(t *testing.T) {
-	// 模拟任务被其他 Worker 领取
 	store := &fakeJobStore{
 		rejectClaim: true,
 	}
@@ -176,9 +197,9 @@ func TestRunner_ClaimRejected(t *testing.T) {
 	executor := ExecutorFunc(func(
 		ctx context.Context,
 		jobID uint64,
-	) error {
+	) (model.ImportJobResult, error) {
 		executeCount++
-		return nil
+		return model.ImportJobResult{}, nil
 	})
 
 	runner, err := NewRunner(
@@ -193,7 +214,6 @@ func TestRunner_ClaimRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 应该尝试领取一次
 	if store.claimCount != 1 {
 		t.Fatalf(
 			"claimCount=%d, want 1",
@@ -201,12 +221,10 @@ func TestRunner_ClaimRejected(t *testing.T) {
 		)
 	}
 
-	// 领取失败，不能执行业务
 	if executeCount != 0 {
 		t.Fatal("领取失败不应该执行 Executor")
 	}
 
-	// 也不能更新任务状态
 	if store.completeCount != 0 ||
 		store.failCount != 0 {
 		t.Fatal("领取失败不应该修改任务状态")
@@ -215,20 +233,26 @@ func TestRunner_ClaimRejected(t *testing.T) {
 	t.Log("PASS: 领取失败，未执行任务")
 }
 
+// 测试四：Lease 丢失，拒绝完成任务。
 func TestRunner_LeaseLost(t *testing.T) {
-	// 模拟完成任务时 Lease 已经失效
 	store := &fakeJobStore{
 		rejectComplete: true,
 	}
 
 	executeCount := 0
 
+	expectedResult := model.ImportJobResult{
+		TreeSHA:    "0123456789abcdef0123456789abcdef01234567",
+		FileCount:  5,
+		TotalBytes: 512,
+	}
+
 	executor := ExecutorFunc(func(
 		ctx context.Context,
 		jobID uint64,
-	) error {
+	) (model.ImportJobResult, error) {
 		executeCount++
-		return nil
+		return expectedResult, nil
 	})
 
 	runner, err := NewRunner(
@@ -255,8 +279,11 @@ func TestRunner_LeaseLost(t *testing.T) {
 		t.Fatal("应该尝试完成任务")
 	}
 
-	// CompleteJob 返回 false 后，
-	// 不应该再调用 FailJob。
+	if store.completeResult != expectedResult {
+		t.Fatal("业务结果没有正确传递")
+	}
+
+	// 完成操作被拒绝后，不应该调用 FailJob。
 	if store.failCount != 0 {
 		t.Fatal("Lease 丢失后不应该调用 FailJob")
 	}
@@ -264,14 +291,16 @@ func TestRunner_LeaseLost(t *testing.T) {
 	t.Log("PASS: Lease 丢失，完成操作被拒绝")
 }
 
+// 测试五：任务超时。
 func TestRunner_TaskTimeout(t *testing.T) {
 	store := &fakeJobStore{}
 
 	executor := ExecutorFunc(func(
 		ctx context.Context,
 		jobID uint64,
-	) error {
-		return context.DeadlineExceeded
+	) (model.ImportJobResult, error) {
+		return model.ImportJobResult{},
+			context.DeadlineExceeded
 	})
 
 	runner, err := NewRunner(
@@ -303,12 +332,10 @@ func TestRunner_TaskTimeout(t *testing.T) {
 	t.Log("PASS: 超时错误正确映射为 TASK_TIMEOUT")
 }
 
-// TestRunner_Shutdown 验证 Worker 主动退出时
-// 不会错误地完成或失败任务。
+// 测试六：Worker 主动退出时不提交任务结果。
 func TestRunner_Shutdown(t *testing.T) {
 	store := &fakeJobStore{}
 
-	// 创建可主动取消的父 Context
 	ctx, cancel := context.WithCancel(
 		context.Background(),
 	)
@@ -319,16 +346,16 @@ func TestRunner_Shutdown(t *testing.T) {
 	executor := ExecutorFunc(func(
 		taskCtx context.Context,
 		jobID uint64,
-	) error {
+	) (model.ImportJobResult, error) {
 		executeCount++
 
-		// 模拟 Worker 执行中收到 Ctrl+C
+		// 模拟 Worker 执行中收到 Ctrl+C。
 		cancel()
 
-		// 等待任务 Context 被取消
+		// 等待任务 Context 被取消。
 		<-taskCtx.Done()
 
-		return taskCtx.Err()
+		return model.ImportJobResult{}, taskCtx.Err()
 	})
 
 	runner, err := NewRunner(
@@ -340,10 +367,8 @@ func TestRunner_Shutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 执行一轮
 	err = runner.RunOnce(ctx)
 
-	// 主动退出应返回 context.Canceled
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf(
 			"expected context.Canceled, got %v",
@@ -351,7 +376,6 @@ func TestRunner_Shutdown(t *testing.T) {
 		)
 	}
 
-	// 任务应该已经领取并开始执行
 	if store.claimCount != 1 {
 		t.Fatalf(
 			"claimCount=%d, want 1",
@@ -366,14 +390,12 @@ func TestRunner_Shutdown(t *testing.T) {
 		)
 	}
 
-	// 主动退出不能标记为成功
 	if store.completeCount != 0 {
 		t.Fatal(
-			"Worker shutdown must not call CompleteJob",
+			"Worker shutdown must not call CompleteJobWithResult",
 		)
 	}
 
-	// 主动退出不能作为普通业务失败
 	if store.failCount != 0 {
 		t.Fatal(
 			"Worker shutdown must not call FailJob",

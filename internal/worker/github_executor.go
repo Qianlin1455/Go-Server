@@ -40,21 +40,28 @@ func NewGitHubExecutor(
 func (e *GitHubExecutor) Execute(
 	ctx context.Context,
 	jobID uint64,
-) error {
+) (model.ImportJobResult, error) {
 	if jobID == 0 {
-		return fmt.Errorf("invalid job id")
+		return model.ImportJobResult{}, fmt.Errorf("invalid job id")
 	}
 
-	//从MySQL读取running Job
+	// 1. 从 MySQL 读取 running Job
 	var job model.ImportJob
 
 	err := e.db.WithContext(ctx).
-		Where("id = ? AND status = ?", jobID, model.ImportJobRunning).Take(&job).Error
+		Where(
+			"id = ? AND status = ?",
+			jobID,
+			model.ImportJobRunning,
+		).
+		Take(&job).Error
+
 	if err != nil {
-		return fmt.Errorf("load running import job %d:%w", jobID, err)
+		return model.ImportJobResult{},
+			fmt.Errorf("load running import job %d: %w", jobID, err)
 	}
 
-	//读取关联的github仓库，复用已用用户、项目、仓库归属查询
+	// 2. 读取关联的 GitHub 仓库
 	binding, err := e.repos.GetByProject(
 		ctx,
 		job.UserID,
@@ -62,10 +69,11 @@ func (e *GitHubExecutor) Execute(
 		job.RepositoryID,
 	)
 	if err != nil {
-		return fmt.Errorf("load repository for job %d:%w", jobID, err)
+		return model.ImportJobResult{},
+			fmt.Errorf("load repository for job %d: %w", jobID, err)
 	}
 
-	//必须使用任务创建时固定的RevisionSHA，不能使用可能变化的binding.LastSHA
+	// 3. 检查任务创建时固定的 Revision
 	summary, err := e.gh.InspectRevision(
 		ctx,
 		binding.Owner,
@@ -73,17 +81,33 @@ func (e *GitHubExecutor) Execute(
 		job.RevisionSHA,
 	)
 	if err != nil {
-		return fmt.Errorf("inspect revision for job %d:%w", jobID, err)
+		return model.ImportJobResult{},
+			fmt.Errorf("inspect revision for job %d: %w", jobID, err)
 	}
 
-	// 4. 记录核验结果
+	// 4. 校验数值，避免非法类型转换
+	if summary.FileCount < 0 ||
+		uint64(summary.FileCount) > uint64(^uint32(0)) ||
+		summary.TotalBytes < 0 {
+		return model.ImportJobResult{},
+			fmt.Errorf("invalid revision summary for job %d", jobID)
+	}
+
+	// 5. 转换为业务结果
+	result := model.ImportJobResult{
+		TreeSHA:    summary.TreeSHA,
+		FileCount:  uint32(summary.FileCount),
+		TotalBytes: uint64(summary.TotalBytes),
+	}
+
 	log.Printf(
-		"job=%d revision verified sha=%s files=%d bytes=%d",
+		"job=%d revision verified commit_sha=%s tree_sha=%s files=%d bytes=%d",
 		jobID,
 		summary.CommitSHA,
+		summary.TreeSHA,
 		summary.FileCount,
 		summary.TotalBytes,
 	)
 
-	return nil
+	return result, nil
 }

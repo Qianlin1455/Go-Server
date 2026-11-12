@@ -18,7 +18,11 @@ type ImportJob struct {
 	IdempotencyKey     string `gorm:"column:idempotency_key;not null"`
 	RequestFingerprint string `gorm:"column:request_fingerprint;not null"`
 	RevisionSHA        string `gorm:"column:revision_sha;not null"`
-	Status             string `gorm:"column:status;not null"`
+	// 导入结果：任务尚未完成时为 nil
+	ResultTreeSHA    *string `gorm:"column:result_tree_sha"`
+	ResultFileCount  *uint32 `gorm:"column:result_file_count"`
+	ResultTotalBytes *uint64 `gorm:"column:result_total_bytes"`
+	Status           string  `gorm:"column:status;not null"`
 
 	// 执行与重试
 	AttemptCount uint16    `gorm:"column:attempt_count;default:0"`
@@ -40,6 +44,13 @@ type ImportJob struct {
 
 	CreatedAt time.Time `gorm:"column:created_at"`
 	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+// ImportJobResult 表示一次导入任务的执行结果。
+type ImportJobResult struct {
+	TreeSHA    string
+	FileCount  uint32
+	TotalBytes uint64
 }
 
 func (ImportJob) TableName() string {

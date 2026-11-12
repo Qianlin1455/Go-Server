@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"GoServer/internal/model"
@@ -21,12 +22,25 @@ func NewImportJobStore(db *gorm.DB) *ImportJobStore {
 	return &ImportJobStore{db: db}
 }
 
+var ErrInvalidCreateWithOutboxArgs = errors.New(
+	"invalid create import job with outbox arguments",
+)
+
 var ErrInvalidCompleteJobArgs = errors.New(
 	"invalid complete job arguments",
 )
+
 var ErrInvalidClaimArgs = errors.New("invalid claim arguments")
 var ErrInvalidFailJobArgs = errors.New(
 	"invalid fail job arguments",
+)
+
+var ErrInvalidCompleteJobResult = errors.New(
+	"invalid complete job result",
+)
+
+var importJobTreeSHAPattern = regexp.MustCompile(
+	`^[0-9a-fA-F]{40}$`,
 )
 
 var failJobErrorCodePattern = regexp.MustCompile(
@@ -113,10 +127,6 @@ func (r *ImportJobStore) Create(
 	return r.db.WithContext(ctx).
 		Create(job).Error
 }
-
-var ErrInvalidCreateWithOutboxArgs = errors.New(
-	"invalid create import job with outbox arguments",
-)
 
 // CreateWithOutbox 在同一个 MySQL 事务中创建 ImportJob 和 OutboxEvent。
 //
@@ -400,4 +410,48 @@ func (r *ImportJobStore) FailJob(
 		return true, nil
 	}
 	return false, nil
+}
+
+func (r *ImportJobStore) CompleteJobWithResult(
+	ctx context.Context,
+	jobID uint64,
+	leaseToken []byte,
+	result model.ImportJobResult,
+) (completed bool, err error) {
+	//参数校验
+	if jobID == 0 || len(leaseToken) != 16 {
+		return false, ErrInvalidCompleteJobArgs
+	}
+	if !importJobTreeSHAPattern.MatchString(result.TreeSHA) {
+		return false, ErrInvalidCompleteJobResult
+	}
+
+	//CAS更新：结果持久化与状态变更在同一条sql
+	dbResult := r.db.WithContext(ctx).Model(&model.ImportJob{}).
+		Where(
+			"id = ? AND status = ? AND lease_token = ? AND lease_expires_at>NOW(3)",
+			jobID, model.ImportJobRunning, leaseToken,
+		).Updates(map[string]any{
+		"result_tree_sha":    strings.ToLower(result.TreeSHA),
+		"result_file_count":  result.FileCount,
+		"result_total_bytes": result.TotalBytes,
+
+		"status":      model.ImportJobSucceeded,
+		"finished_at": gorm.Expr("NOW(3)"),
+
+		"lease_owner":      nil,
+		"lease_token":      nil,
+		"lease_expires_at": nil,
+
+		"last_error_code":    nil,
+		"last_error_message": nil,
+	})
+
+	if dbResult.Error != nil {
+		return false, fmt.Errorf(
+			"complete import job with result:%w",
+			dbResult.Error,
+		)
+	}
+	return dbResult.RowsAffected == 1, nil
 }
