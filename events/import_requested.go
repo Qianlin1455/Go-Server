@@ -15,6 +15,11 @@ var commitSHAPattern = regexp.MustCompile(
 	`^[0-9a-fA-F]{40}$`,
 )
 
+var (
+	ErrInvalidImportEventType        = errors.New("invalid event_type")
+	ErrUnsupportedImportEventVersion = errors.New("unsupported schema_version")
+)
+
 // ImportRequestedV1 描述导入任务创建事件。
 // 事件本身不执行任务，也不直接发送 Kafka。
 type ImportRequestedV1 struct {
@@ -36,11 +41,11 @@ func (e ImportRequestedV1) Validate() error {
 	}
 
 	if e.EventType != ImportRequestedType {
-		return errors.New("invalid event_type")
+		return ErrInvalidImportEventType
 	}
 
 	if e.SchemaVersion != ImportRequestedVersion {
-		return errors.New("unsupported schema_version")
+		return ErrUnsupportedImportEventVersion
 	}
 
 	if e.OccurredAt.IsZero() {

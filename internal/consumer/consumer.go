@@ -56,6 +56,9 @@ func NewConsumer(
 	config.Consumer.Offsets.AutoCommit.Enable = false
 	//开启Consumer Group错误通知
 	config.Consumer.Return.Errors = true
+	// The handler uses session.Context as the ownership boundary. An eager
+	// rebalance cancels the entire session before claims are reassigned.
+	config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRange()}
 
 	//创建Consumer Group
 	group, err := sarama.NewConsumerGroup(
@@ -121,6 +124,6 @@ func (c *Consumer) Run(ctx context.Context) error {
 		}
 
 	}
-	log.Println("consumer stopped")
+	log.Println("consumer stopped: canceled Kafka session; unfinished jobs use lease recovery")
 	return nil
 }

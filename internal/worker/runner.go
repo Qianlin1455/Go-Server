@@ -114,8 +114,30 @@ func NewRunner(
 	}, nil
 }
 
-// Run 启动 Worker 调度循环。
-func (r *Runner) Run(ctx context.Context) error {
+// Run stops claiming on shutdown and gives in-flight work time to finish.
+func (r *Runner) Run(ctx context.Context, grace time.Duration) error {
+	if grace <= 0 {
+		return errors.New("worker shutdown grace must be positive")
+	}
+
+	executionCtx, cancelExecution := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelExecution()
+	go func() {
+		select {
+		case <-executionCtx.Done():
+			return
+		case <-ctx.Done():
+		}
+		log.Printf("worker=%s draining grace=%s", r.workerID, grace)
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-executionCtx.Done():
+		case <-timer.C:
+			cancelExecution()
+		}
+	}()
+
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -128,7 +150,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 
 		// 每次处理最多一个任务
-		if err := r.RunOnce(ctx); err != nil {
+		if err := r.runOnce(ctx, executionCtx); err != nil {
 			if ctx.Err() == nil {
 				log.Printf("worker poll failed: %v", err)
 			}
@@ -148,6 +170,10 @@ func (r *Runner) Run(ctx context.Context) error {
 // RunOnce 执行一轮任务回收、扫描和领取。
 
 func (r *Runner) RunOnce(ctx context.Context) error {
+	return r.runOnce(ctx, ctx)
+}
+
+func (r *Runner) runOnce(ctx, executionCtx context.Context) error {
 	scanCtx, cancel := context.WithTimeout(
 		ctx,
 		scanTimeout,
@@ -185,7 +211,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 
-		claimed, err := r.ProcessJob(ctx, jobID)
+		claimed, err := r.processJob(ctx, executionCtx, jobID)
 		if err != nil {
 			return err
 		}
@@ -208,6 +234,10 @@ func (r *Runner) ProcessJob(
 	ctx context.Context,
 	jobID uint64,
 ) (bool, error) {
+	return r.processJob(ctx, ctx, jobID)
+}
+
+func (r *Runner) processJob(ctx, executionCtx context.Context, jobID uint64) (bool, error) {
 	if jobID == 0 {
 		return false, errors.New("invalid job id")
 	}
@@ -255,7 +285,10 @@ func (r *Runner) ProcessJob(
 	)
 
 	// 2. 执行任务并持久化结果
-	if err := r.executeClaimed(ctx, jobID, token); err != nil {
+	started := time.Now()
+	err = r.executeClaimed(executionCtx, jobID, token)
+	log.Printf("worker=%s job_id=%d elapsed=%s process_error=%v", r.workerID, jobID, time.Since(started), err)
+	if err != nil {
 		return true, err
 	}
 
@@ -287,11 +320,11 @@ func (r *Runner) executeClaimed(
 		execErr = taskErr
 	}
 
-	// Worker 主动关闭时，不提交成功或失败状态。
+	// 排空到期或 Kafka Session 取消时，保留任务供租约恢复。
 	// 保留 running，等待 Lease 到期后由其他 Worker 回收。
 	if ctx.Err() != nil {
 		log.Printf(
-			"worker=%s shutting down, job=%d left for lease recovery",
+			"worker=%s job_id=%d execution canceled; left for lease recovery",
 			r.workerID,
 			jobID,
 		)
@@ -301,7 +334,7 @@ func (r *Runner) executeClaimed(
 	// 2. 独立收尾 Context
 	// 即使任务超时，也允许短时间内写入数据库状态。
 	finishCtx, finishCancel := context.WithTimeout(
-		context.Background(),
+		ctx,
 		finishTimeout,
 	)
 	defer finishCancel()

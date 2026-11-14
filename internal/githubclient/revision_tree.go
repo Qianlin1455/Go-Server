@@ -52,7 +52,7 @@ func (c *Client) InspectRevision(
 			SHA string `json:"sha"`
 		} `json:"tree"`
 	}
-	err := c.doJSON(ctx, base+"git/commits/"+revisionSHA, maxMetadata, &commit)
+	err := c.doJSON(ctx, base+"/git/commits/"+revisionSHA, maxMetadata, &commit)
 	if err != nil {
 		return result, err
 	}

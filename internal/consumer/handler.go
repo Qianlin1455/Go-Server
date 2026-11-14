@@ -14,6 +14,7 @@ import (
 	"GoServer/internal/model"
 
 	"github.com/IBM/sarama"
+	"gorm.io/gorm"
 )
 
 const jobStatePollInterval = 500 * time.Millisecond
@@ -39,6 +40,7 @@ type JobProcessor interface {
 type Handler struct {
 	jobs   JobStore
 	runner JobProcessor
+	dlq    DeadLetterProducer
 
 	// 第一版保证同一个进程内串行处理消息。
 	processSem chan struct{}
@@ -51,16 +53,21 @@ type Handler struct {
 func NewHandler(
 	jobs JobStore,
 	runner JobProcessor,
+	dlq ...DeadLetterProducer,
 ) (*Handler, error) {
-	if jobs == nil || runner == nil {
+	if jobs == nil || runner == nil || len(dlq) > 1 || (len(dlq) == 1 && dlq[0] == nil) {
 		return nil, errors.New("invalid consumer handler configuration")
 	}
 
-	return &Handler{
+	h := &Handler{
 		jobs:       jobs,
 		runner:     runner,
 		processSem: make(chan struct{}, 1),
-	}, nil
+	}
+	if len(dlq) == 1 {
+		h.dlq = dlq[0]
+	}
+	return h, nil
 }
 
 // Setup 在 Consumer Session 建立时调用。
@@ -82,8 +89,10 @@ func (h *Handler) Cleanup(
 	session sarama.ConsumerGroupSession,
 ) error {
 	log.Printf(
-		"consumer session cleanup: member=%s",
+		"consumer session cleanup: member=%s generation=%d cause=%v",
 		session.MemberID(),
+		session.GenerationID(),
+		context.Cause(session.Context()),
 	)
 
 	return nil
@@ -103,6 +112,7 @@ func (h *Handler) ConsumeClaim(
 			if !ok {
 				return nil
 			}
+			started := time.Now()
 
 			// 控制同一个 Consumer 进程内的任务并发。
 			select {
@@ -116,32 +126,38 @@ func (h *Handler) ConsumeClaim(
 					<-h.processSem
 				}()
 
-				return h.handleMessage(
-					session.Context(),
-					msg,
-				)
+				if err := session.Context().Err(); err != nil {
+					return err
+				}
+				err := h.handleMessage(session.Context(), msg)
+				var permanent *permanentMessageError
+				if errors.As(err, &permanent) {
+					return h.sendDeadLetter(session.Context(), msg, permanent)
+				}
+				return err
 			}()
 
 			// 业务处理失败，不能标记消息，
 			// 也不能提交 Offset。
 			if err != nil {
 				return fmt.Errorf(
-					"process kafka message topic=%s partition=%d offset=%d: %w",
+					"process kafka message topic=%s partition=%d offset=%d event_id=%q job_id=%d elapsed=%s: %w",
 					msg.Topic,
 					msg.Partition,
 					msg.Offset,
+					readEventID(msg.Value),
+					readJobID(msg.Value),
+					time.Since(started),
 					err,
 				)
 			}
 
-			// Session 已结束时，不提交 Offset。
+			// A persisted terminal state or a confirmed dead letter permits the commit.
+			h.commitMu.Lock()
 			if session.Context().Err() != nil {
+				h.commitMu.Unlock()
 				return nil
 			}
-
-			// 业务任务已经进入持久化终态。
-			// 现在才允许标记消息并提交 Offset。
-			h.commitMu.Lock()
 
 			session.MarkMessage(msg, "")
 			session.Commit()
@@ -149,11 +165,12 @@ func (h *Handler) ConsumeClaim(
 			h.commitMu.Unlock()
 
 			log.Printf(
-				"message committed: event_id=%s job_id=%d partition=%d offset=%d",
+				"offset commit requested: event_id=%q job_id=%d partition=%d offset=%d elapsed=%s",
 				readEventID(msg.Value),
 				readJobID(msg.Value),
 				msg.Partition,
 				msg.Offset,
+				time.Since(started),
 			)
 		}
 	}
@@ -168,16 +185,23 @@ func (h *Handler) handleMessage(
 
 	// 1. JSON 解析
 	if err := json.Unmarshal(msg.Value, &event); err != nil {
-		return fmt.Errorf("decode import event: %w", err)
+		return &permanentMessageError{"INVALID_EVENT_JSON", "cannot decode import event JSON"}
 	}
 
 	// 2. 事件结构校验
 	if err := event.Validate(); err != nil {
-		return fmt.Errorf("validate import event: %w", err)
+		code := "INVALID_EVENT_FIELDS"
+		switch {
+		case errors.Is(err, events.ErrInvalidImportEventType):
+			code = "INVALID_EVENT_TYPE"
+		case errors.Is(err, events.ErrUnsupportedImportEventVersion):
+			code = "UNSUPPORTED_EVENT_VERSION"
+		}
+		return &permanentMessageError{code, err.Error()}
 	}
 
 	log.Printf(
-		"received import event: event_id=%s job_id=%d revision=%s",
+		"received import event: event_id=%q job_id=%d revision=%s",
 		event.EventID,
 		event.JobID,
 		event.RevisionSHA,
@@ -200,6 +224,9 @@ func (h *Handler) processUntilTerminal(
 		// 1. 查询 MySQL 中的真实任务状态。
 		job, err := h.jobs.GetByID(ctx, event.JobID)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return &permanentMessageError{"IMPORT_JOB_NOT_FOUND", "referenced import job does not exist"}
+			}
 			return fmt.Errorf(
 				"load import job %d: %w",
 				event.JobID,
@@ -216,7 +243,7 @@ func (h *Handler) processUntilTerminal(
 
 		// 2. 验证 Kafka 事件与 MySQL 任务一致。
 		if err := validateEventJob(event, job); err != nil {
-			return err
+			return &permanentMessageError{"IMPORT_JOB_MISMATCH", "event and import job fields do not match"}
 		}
 
 		switch job.Status {
@@ -225,7 +252,7 @@ func (h *Handler) processUntilTerminal(
 			// 重复投递：之前已经成功。
 			// 不再执行 GitHub 导入。
 			log.Printf(
-				"job=%d already succeeded, skip duplicate event=%s",
+				"job=%d already succeeded, skip duplicate event=%q",
 				job.ID,
 				event.EventID,
 			)
@@ -235,7 +262,7 @@ func (h *Handler) processUntilTerminal(
 			// 永久失败或重试次数耗尽。
 			// 失败状态已经持久化，可以确认消息。
 			log.Printf(
-				"job=%d already failed, skip duplicate event=%s",
+				"job=%d already failed, skip duplicate event=%q",
 				job.ID,
 				event.EventID,
 			)
