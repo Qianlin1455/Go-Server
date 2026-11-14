@@ -167,6 +167,7 @@ func createWorkerIntegrationJob(
 // 模拟 GitHub API。
 type integrationRevisionInspector struct {
 	summary githubclient.RevisionSummary
+	err     error
 
 	owner    string
 	repo     string
@@ -187,7 +188,89 @@ func (f *integrationRevisionInspector) InspectRevision(
 	f.repo = repo
 	f.revision = sha
 
-	return f.summary, nil
+	return f.summary, f.err
+}
+
+func TestRunner_RetrySchedule_MySQLIntegration(t *testing.T) {
+	ctx := context.Background()
+	tx := setupWorkerIntegrationTx(t)
+	job, _ := createWorkerIntegrationJob(t, tx)
+	store := repository.NewImportJobStore(tx)
+	inspector := &integrationRevisionInspector{err: githubclient.ErrTimeout}
+	runner, err := NewRunner(store, NewGitHubExecutor(tx, inspector), "retry-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.retry.int64n = func(n int64) int64 { return n - 1 }
+
+	// Query both clocks from the same MySQL session. This also works with
+	// a non-UTC session time zone.
+	readClocks := func() (sessionNow, utcNow time.Time) {
+		t.Helper()
+		if err := tx.Raw("SELECT NOW(3), UTC_TIMESTAMP(3)").Row().Scan(&sessionNow, &utcNow); err != nil {
+			t.Fatal(err)
+		}
+		return sessionNow, utcNow
+	}
+
+	for _, tt := range []struct {
+		attempt    uint16
+		delay      time.Duration
+		serverWait time.Duration
+		status     string
+		errorCode  string
+	}{
+		{1, 5 * time.Second, 0, model.ImportJobQueued, "GITHUB_TIMEOUT"},
+		{2, 10 * time.Second, 3 * time.Minute, model.ImportJobQueued, "GITHUB_RATE_LIMITED"},
+		{3, 0, 3 * time.Minute, model.ImportJobFailed, "GITHUB_RATE_LIMITED"},
+	} {
+		before, utcNow := readClocks()
+		if tt.serverWait > 0 {
+			// Interpret the UTC clock's DATETIME fields as UTC even if the
+			// MySQL driver decodes all DATETIME values in another location.
+			utcNow = time.Date(utcNow.Year(), utcNow.Month(), utcNow.Day(),
+				utcNow.Hour(), utcNow.Minute(), utcNow.Second(), utcNow.Nanosecond(), time.UTC)
+			inspector.err = &githubclient.RateLimitError{RetryAt: utcNow.Add(tt.serverWait)}
+		}
+		claimed, err := runner.ProcessJob(ctx, job.ID)
+		if err != nil || !claimed {
+			t.Fatalf("attempt %d: claimed=%v, err=%v", tt.attempt, claimed, err)
+		}
+		after, _ := readClocks()
+		got, err := store.GetByID(ctx, job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != tt.status || got.AttemptCount != tt.attempt || got.LastErrorCode == nil || *got.LastErrorCode != tt.errorCode {
+			t.Fatalf("attempt %d: unexpected job state: %+v", tt.attempt, got)
+		}
+		if tt.status == model.ImportJobFailed {
+			if got.FinishedAt == nil {
+				t.Fatal("failed job has no finished_at")
+			}
+			break
+		}
+		earliest := before.Add(tt.serverWait + tt.delay)
+		latest := after.Add(tt.delay)
+		if tt.serverWait > 0 {
+			latest = earliest
+		}
+		if got.AvailableAt.Before(earliest) || got.AvailableAt.After(latest) {
+			t.Fatalf("attempt %d: available_at=%v, want [%v, %v]", tt.attempt, got.AvailableAt, earliest, latest)
+		}
+		claimed, err = runner.ProcessJob(ctx, job.ID)
+		if err != nil || claimed {
+			t.Fatalf("attempt %d: early claim=%v, err=%v", tt.attempt, claimed, err)
+		}
+		// Move the schedule forward without sleeping in the test.
+		if err := tx.Model(&model.ImportJob{}).Where("id = ?", job.ID).
+			UpdateColumn("available_at", gorm.Expr("NOW(3)")).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if inspector.calls != int(job.MaxAttempts) {
+		t.Fatalf("GitHub calls=%d, want %d", inspector.calls, job.MaxAttempts)
+	}
 }
 
 // 测试真实 Runner + GitHubExecutor + MySQL 完整链路。

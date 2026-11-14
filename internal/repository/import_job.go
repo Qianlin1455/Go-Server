@@ -352,17 +352,38 @@ func (r *ImportJobStore) CompleteJob(
 
 }
 
+// FailJob adds retryDelay to the later of database time and retryAt, if set.
 func (r *ImportJobStore) FailJob(
 	ctx context.Context,
 	jobID uint64,
 	leaseToken []byte,
 	errorCode string,
+	retryDelay time.Duration,
+	retryAt time.Time,
 ) (updated bool, err error) {
 	//参数校验
 	if jobID == 0 ||
 		len(leaseToken) != 16 ||
+		retryDelay <= 0 ||
 		!failJobErrorCodePattern.MatchString(errorCode) {
 		return false, ErrInvalidFailJobArgs
+	}
+	// Round up to the precision of available_at.
+	delayMicros := (int64((retryDelay-1)/time.Millisecond) + 1) * 1000
+	availableAt := gorm.Expr("DATE_ADD(NOW(3), INTERVAL ? MICROSECOND)", delayMicros)
+	if !retryAt.IsZero() {
+		// Compare the absolute deadline with the database's UTC clock, then
+		// apply the remaining wait to the session clock used by the claim.
+		deadline := retryAt.UTC().Truncate(time.Millisecond)
+		if deadline.Before(retryAt) {
+			deadline = deadline.Add(time.Millisecond)
+		}
+		availableAt = gorm.Expr(
+			`DATE_ADD(
+				NOW(3),
+				INTERVAL (? + GREATEST(0, TIMESTAMPDIFF(MICROSECOND, UTC_TIMESTAMP(3), ?))) MICROSECOND
+			)`, delayMicros, deadline.Format("2006-01-02 15:04:05.000"),
+		)
 	}
 	//尝试重新排队
 	result := r.db.WithContext(ctx).
@@ -378,13 +399,8 @@ func (r *ImportJobStore) FailJob(
 			leaseToken,
 		).
 		Updates(map[string]interface{}{
-			"status": model.ImportJobQueued,
-
-			// 5 秒后允许下一次领取
-			"available_at": gorm.Expr(
-				"DATE_ADD(NOW(3), INTERVAL 5 SECOND)",
-			),
-
+			"status":             model.ImportJobQueued,
+			"available_at":       availableAt,
 			"finished_at":        nil,
 			"lease_owner":        nil,
 			"lease_token":        nil,

@@ -411,7 +411,7 @@ func TestFailJob_Requeue(t *testing.T) {
 	)
 
 	updated, err := store.FailJob(
-		ctx, job.ID, token, "GITHUB_TIMEOUT",
+		ctx, job.ID, token, "GITHUB_TIMEOUT", 5*time.Second, time.Time{},
 	)
 	if err != nil || !updated {
 		t.Fatalf(
@@ -467,7 +467,7 @@ func TestFailJob_MaxAttempts(t *testing.T) {
 	)
 
 	updated, err := store.FailJob(
-		ctx, job.ID, token, "GITHUB_TIMEOUT",
+		ctx, job.ID, token, "GITHUB_TIMEOUT", 5*time.Second, time.Time{},
 	)
 	if err != nil || !updated {
 		t.Fatalf(
@@ -489,6 +489,9 @@ func TestFailJob_MaxAttempts(t *testing.T) {
 	if got.AttemptCount != 1 {
 		t.Fatal("attempt_count 不应该增加")
 	}
+	if got.LastErrorCode == nil || *got.LastErrorCode != "GITHUB_TIMEOUT" {
+		t.Fatal("最终失败应保留业务错误码")
+	}
 
 	assertLeaseCleared(t, got)
 
@@ -504,7 +507,7 @@ func TestFailJob_ExpiredLease(t *testing.T) {
 	)
 
 	updated, err := store.FailJob(
-		ctx, job.ID, token, "GITHUB_TIMEOUT",
+		ctx, job.ID, token, "GITHUB_TIMEOUT", 5*time.Second, time.Time{},
 	)
 
 	if err != nil {
@@ -529,4 +532,43 @@ func TestFailJob_ExpiredLease(t *testing.T) {
 	}
 
 	t.Log("PASS: 过期 Lease 被拒绝")
+}
+
+func TestFailJob_StaleAndRepeatedUpdates(t *testing.T) {
+	ctx := context.Background()
+	tx, store, job, oldToken := prepareRecoveryJob(t, 3, true)
+	if _, _, err := store.RecoverExpiredJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	newToken, claimed, err := store.ClaimQueuedJob(ctx, job.ID, "worker-B", 30*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("reclaim: claimed=%v, err=%v", claimed, err)
+	}
+
+	updated, err := store.FailJob(ctx, job.ID, oldToken, "STALE_FAILURE", time.Minute, time.Time{})
+	if err != nil || updated {
+		t.Fatalf("stale failure: updated=%v, err=%v", updated, err)
+	}
+	running := loadRecoveryJob(t, tx, job.ID)
+	if running.Status != model.ImportJobRunning || running.AttemptCount != 2 ||
+		!bytes.Equal(running.LeaseToken, newToken) || running.LastErrorCode != nil {
+		t.Fatalf("stale update changed running job: %+v", running)
+	}
+
+	updated, err = store.FailJob(ctx, job.ID, newToken, "GITHUB_TIMEOUT", 10*time.Second, time.Time{})
+	if err != nil || !updated {
+		t.Fatalf("valid failure: updated=%v, err=%v", updated, err)
+	}
+	queued := loadRecoveryJob(t, tx, job.ID)
+	updated, err = store.FailJob(ctx, job.ID, newToken, "DUPLICATE_FAILURE", time.Minute, time.Time{})
+	if err != nil || updated {
+		t.Fatalf("duplicate failure: updated=%v, err=%v", updated, err)
+	}
+	got := loadRecoveryJob(t, tx, job.ID)
+	if got.Status != model.ImportJobQueued || got.AttemptCount != 2 || got.FinishedAt != nil ||
+		got.LastErrorCode == nil || *got.LastErrorCode != "GITHUB_TIMEOUT" ||
+		!got.AvailableAt.Equal(queued.AvailableAt) || !got.UpdatedAt.Equal(queued.UpdatedAt) {
+		t.Fatalf("duplicate update changed queued job: %+v", got)
+	}
+	assertLeaseCleared(t, got)
 }

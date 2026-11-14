@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"time"
 
+	"GoServer/internal/githubclient"
 	"GoServer/internal/model"
 )
 
@@ -47,11 +49,15 @@ type JobStore interface {
 		result model.ImportJobResult,
 	) (bool, error)
 
+	GetByID(ctx context.Context, jobID uint64) (*model.ImportJob, error)
+
 	FailJob(
 		ctx context.Context,
 		jobID uint64,
 		leaseToken []byte,
 		errorCode string,
+		retryDelay time.Duration,
+		retryAt time.Time,
 	) (bool, error)
 
 	FailJobPermanently(
@@ -88,6 +94,7 @@ type Runner struct {
 	store    JobStore
 	executor Executor
 	workerID string
+	retry    retryPolicy
 }
 
 func NewRunner(
@@ -103,6 +110,7 @@ func NewRunner(
 		store:    store,
 		executor: executor,
 		workerID: workerID,
+		retry:    retryPolicy{int64n: rand.Int64N},
 	}, nil
 }
 
@@ -272,7 +280,10 @@ func (r *Runner) executeClaimed(
 	taskErr := taskCtx.Err()
 	cancel()
 
-	if taskErr != nil {
+	var rateLimit *githubclient.RateLimitError
+	errors.As(execErr, &rateLimit)
+	// Keep the server's retry deadline if it arrived as the task timed out.
+	if taskErr != nil && rateLimit == nil {
 		execErr = taskErr
 	}
 
@@ -357,11 +368,21 @@ func (r *Runner) executeClaimed(
 		)
 	} else {
 		// 临时错误：重新排队，等待下一次重试
+		job, err := r.store.GetByID(finishCtx, jobID)
+		if err != nil {
+			return fmt.Errorf("load job %d attempt count for retry: %w", jobID, err)
+		}
+		var retryAt time.Time
+		if rateLimit != nil {
+			retryAt = rateLimit.RetryAt
+		}
 		updated, updateErr = r.store.FailJob(
 			finishCtx,
 			jobID,
 			token,
 			errorCode,
+			r.retry.delay(job.AttemptCount),
+			retryAt,
 		)
 	}
 
@@ -390,7 +411,7 @@ func (r *Runner) executeClaimed(
 		)
 	} else {
 		log.Printf(
-			"job=%d retry scheduled: code=%s err=%v",
+			"job=%d retryable failure recorded: code=%s err=%v",
 			jobID,
 			errorCode,
 			execErr,

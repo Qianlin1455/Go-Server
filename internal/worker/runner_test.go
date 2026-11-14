@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ type fakeJobStore struct {
 	failCount          int
 	lastErrorCode      string
 	permanentFailCount int
+	retryDelay         time.Duration
+	retryAt            time.Time
 
 	// 记录 Runner 传递过来的业务结果
 	completeResult model.ImportJobResult
@@ -86,10 +89,18 @@ func (f *fakeJobStore) FailJob(
 	jobID uint64,
 	token []byte,
 	errorCode string,
+	retryDelay time.Duration,
+	retryAt time.Time,
 ) (bool, error) {
 	f.failCount++
 	f.lastErrorCode = errorCode
+	f.retryDelay = retryDelay
+	f.retryAt = retryAt
 	return true, nil
+}
+
+func (f *fakeJobStore) GetByID(context.Context, uint64) (*model.ImportJob, error) {
+	return &model.ImportJob{AttemptCount: uint16(f.claimCount)}, nil
 }
 
 // 测试一：执行成功，且业务结果正确传递到 Store。
@@ -466,4 +477,30 @@ func TestRunner_PermanentFailure(t *testing.T) {
 	}
 
 	t.Log("PASS: 永久错误直接进入 failed，不再重试")
+}
+
+func TestRunner_RetrySchedule(t *testing.T) {
+	store := &fakeJobStore{}
+	retryAt := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, uint64) (model.ImportJobResult, error) {
+		return model.ImportJobResult{}, fmt.Errorf("inspect revision: %w", &githubclient.RateLimitError{
+			RetryAt: retryAt,
+		})
+	}), "worker-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.retry.int64n = func(n int64) int64 { return n - 1 }
+
+	for attempt, wantDelay := range []time.Duration{5 * time.Second, 10 * time.Second} {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if store.failCount != attempt+1 || store.lastErrorCode != "GITHUB_RATE_LIMITED" {
+			t.Fatalf("attempt %d: failure count=%d, error code=%s", attempt+1, store.failCount, store.lastErrorCode)
+		}
+		if store.retryDelay != wantDelay || !store.retryAt.Equal(retryAt) {
+			t.Fatalf("attempt %d: got delay=%v, retryAt=%v, want %v, %v", attempt+1, store.retryDelay, store.retryAt, wantDelay, retryAt)
+		}
+	}
 }
