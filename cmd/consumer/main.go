@@ -12,11 +12,18 @@ import (
 	"GoServer/internal/consumer"
 	"GoServer/internal/database"
 	"GoServer/internal/githubclient"
+	"GoServer/internal/publisher"
 	"GoServer/internal/repository"
 	"GoServer/internal/worker"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -27,12 +34,12 @@ func main() {
 	// 1. 初始化 MySQL
 	db, err := database.InitDB()
 	if err != nil {
-		log.Fatalf("init MySQL: %v", err)
+		return fmt.Errorf("init MySQL: %w", err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("get MySQL connection pool: %v", err)
+		return fmt.Errorf("get MySQL connection pool: %w", err)
 	}
 	defer sqlDB.Close()
 
@@ -57,23 +64,19 @@ func main() {
 		workerID,
 	)
 	if err != nil {
-		log.Fatalf("create runner: %v", err)
-	}
-
-	// 5. 创建 Handler，注入 Repository 和 Runner
-	handler, err := consumer.NewHandler(
-		jobStore,
-		runner,
-	)
-	if err != nil {
-		log.Fatalf("create consumer handler: %v", err)
+		return fmt.Errorf("create runner: %w", err)
 	}
 
 	// 6. Kafka 配置
 	brokers := []string{"127.0.0.1:9092"}
 
 	if raw := os.Getenv("KAFKA_BROKERS"); raw != "" {
-		brokers = strings.Split(raw, ",")
+		brokers = nil
+		for _, broker := range strings.Split(raw, ",") {
+			if broker = strings.TrimSpace(broker); broker != "" {
+				brokers = append(brokers, broker)
+			}
+		}
 	}
 
 	groupID := consumer.DefaultGroupID
@@ -82,14 +85,28 @@ func main() {
 		groupID = raw
 	}
 
-	// 7. 创建 Consumer
+	producer, err := publisher.NewSaramaSyncProducer(brokers)
+	if err != nil {
+		return fmt.Errorf("create DLQ producer: %w", err)
+	}
+	defer func() {
+		if err := producer.Close(); err != nil {
+			log.Printf("close DLQ producer: %v", err)
+		}
+	}()
+
+	handler, err := consumer.NewHandler(jobStore, runner, producer)
+	if err != nil {
+		return fmt.Errorf("create consumer handler: %w", err)
+	}
+
 	c, err := consumer.NewConsumer(
 		brokers,
 		groupID,
 		handler,
 	)
 	if err != nil {
-		log.Fatalf("create kafka consumer: %v", err)
+		return fmt.Errorf("create kafka consumer: %w", err)
 	}
 
 	log.Printf(
@@ -100,7 +117,5 @@ func main() {
 	)
 
 	// 8. 启动消费
-	if err := c.Run(ctx); err != nil {
-		log.Fatalf("consumer stopped: %v", err)
-	}
+	return c.Run(ctx)
 }

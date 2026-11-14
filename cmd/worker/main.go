@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"syscall"
+	"time"
 
 	"GoServer/internal/database"
 	"GoServer/internal/githubclient"
@@ -14,9 +16,15 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	// V1 仅允许在明确选择核验模式时启动
 	if os.Getenv("WORKER_MODE") != "revision-check" {
-		log.Fatal(
+		return fmt.Errorf(
 			"set WORKER_MODE=revision-check " +
 				"to enable metadata-only worker",
 		)
@@ -26,18 +34,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
+		syscall.SIGTERM,
 	)
 	defer stop()
+
+	grace := 15 * time.Second
+	if raw := os.Getenv("WORKER_SHUTDOWN_GRACE"); raw != "" {
+		var err error
+		grace, err = time.ParseDuration(raw)
+		if err != nil || grace <= 0 {
+			return fmt.Errorf("WORKER_SHUTDOWN_GRACE must be a positive duration")
+		}
+	}
 
 	// 2. 初始化 MySQL
 	db, err := database.InitDB()
 	if err != nil {
-		log.Fatalf("init MySQL: %v", err)
+		return fmt.Errorf("init MySQL: %w", err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("get DB pool: %v", err)
+		return fmt.Errorf("get DB pool: %w", err)
 	}
 	defer sqlDB.Close()
 
@@ -60,11 +78,9 @@ func main() {
 		workerID,
 	)
 	if err != nil {
-		log.Fatalf("init runner: %v", err)
+		return fmt.Errorf("init runner: %w", err)
 	}
 
 	// 6. 启动任务调度循环
-	if err := runner.Run(ctx); err != nil {
-		log.Fatalf("run worker: %v", err)
-	}
+	return runner.Run(ctx, grace)
 }
