@@ -50,6 +50,9 @@ func TestSourceStore_Visibility(t *testing.T) {
 		if matches, total, err := store.Search(ctx, scope, job.ID, "internal", "", 1, 20); err != nil || len(matches) != 0 || total != 0 {
 			t.Fatalf("search invisible snapshot: matches=%d total=%d err=%v", len(matches), total, err)
 		}
+		if matches, err := store.SearchEvidenceCandidates(ctx, scope, job.ID, job.RevisionSHA, []string{"internal"}, 4096); err != nil || len(matches) != 0 {
+			t.Fatalf("read invisible evidence: matches=%d err=%v", len(matches), err)
+		}
 	}
 
 	assertInvisible(scope)
@@ -75,6 +78,9 @@ func TestSourceStore_Visibility(t *testing.T) {
 	assertInvisible(SourceScope{UserID: job.UserID, ProjectID: job.ProjectID + 1})
 	if got, err := store.GetFile(ctx, scope, file.ID, 512<<10); err != nil || got.Content != content {
 		t.Fatalf("read succeeded file: %v", err)
+	}
+	if matches, err := store.SearchEvidenceCandidates(ctx, scope, job.ID, strings.Repeat("f", 40), []string{"internal"}, 4096); err != nil || len(matches) != 0 {
+		t.Fatalf("read evidence with wrong revision: matches=%d err=%v", len(matches), err)
 	}
 }
 

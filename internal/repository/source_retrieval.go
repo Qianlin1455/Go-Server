@@ -7,6 +7,12 @@ import (
 	"GoServer/internal/model"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+const (
+	EvidenceKeywordLimit   = 4
+	evidenceCandidateLimit = 20
 )
 
 type SourceStore struct {
@@ -54,6 +60,12 @@ func (r *SourceStore) visibleFiles(ctx context.Context, scope SourceScope) *gorm
 // literalLike escapes the chosen escape byte as well as both LIKE wildcards.
 var literalLike = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
 
+const (
+	sourceContentLike  = "s.content COLLATE utf8mb4_bin LIKE ? ESCAPE '!'"
+	sourceMatchColumns = "s.id, s.source_file_id, s.span_index, s.line_start, s.line_end, s.content, s.content_sha256, f.import_job_id, f.revision_sha, f.path, f.language"
+	sourceMatchOrder   = "f.path ASC, s.span_index ASC, s.id ASC"
+)
+
 func withSourcePrefix(query *gorm.DB, prefix string) *gorm.DB {
 	if prefix == "" {
 		return query
@@ -95,10 +107,42 @@ func (r *SourceStore) ListSpans(ctx context.Context, scope SourceScope, fileID u
 func (r *SourceStore) Search(ctx context.Context, scope SourceScope, jobID uint64, keyword, prefix string, page, pageSize int) ([]SourceMatch, int64, error) {
 	query := withSourcePrefix(r.visibleFiles(ctx, scope).Where("f.import_job_id = ?", jobID), prefix).
 		Joins("JOIN source_spans AS s ON s.source_file_id = f.id").
-		Where("s.content COLLATE utf8mb4_bin LIKE ? ESCAPE '!'", "%"+literalLike.Replace(keyword)+"%")
+		Where(sourceContentLike, "%"+literalLike.Replace(keyword)+"%")
 	return readSourcePage[SourceMatch](ctx, "search source spans", query, page, pageSize,
-		"s.id, s.source_file_id, s.line_start, s.line_end, s.content, s.content_sha256, f.import_job_id, f.revision_sha, f.path, f.language",
-		"f.path ASC, s.span_index ASC, s.id ASC")
+		sourceMatchColumns, sourceMatchOrder)
+}
+
+// SearchEvidenceCandidates returns complete spans from an already selected
+// snapshot. Apply the byte limit before LIMIT so large spans cannot crowd out
+// eligible ones.
+func (r *SourceStore) SearchEvidenceCandidates(
+	ctx context.Context, scope SourceScope, jobID uint64, revision string, keywords []string, maxSpanBytes int,
+) ([]SourceMatch, error) {
+	matches := make([]SourceMatch, 0)
+	var predicates []string
+	var args []any
+	for _, keyword := range keywords {
+		if len(predicates) == EvidenceKeywordLimit {
+			break
+		}
+		if strings.TrimSpace(keyword) == "" {
+			continue
+		}
+		pattern := "%" + literalLike.Replace(keyword) + "%"
+		predicates = append(predicates, "("+sourceContentLike+" OR f.path LIKE ? ESCAPE '!')")
+		args = append(args, pattern, pattern)
+	}
+	if len(predicates) == 0 {
+		return matches, nil
+	}
+	err := r.visibleFiles(ctx, scope).
+		Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+		Joins("JOIN source_spans AS s ON s.source_file_id = f.id").
+		Where("f.import_job_id = ? AND LOWER(j.revision_sha) = ?", jobID, revision).
+		Where("OCTET_LENGTH(s.content) BETWEEN 1 AND ?", maxSpanBytes).
+		Where("("+strings.Join(predicates, " OR ")+")", args...).
+		Select(sourceMatchColumns).Order(sourceMatchOrder).Limit(evidenceCandidateLimit).Find(&matches).Error
+	return matches, databaseError(ctx, "search evidence candidates", err)
 }
 
 func readSourcePage[T any](ctx context.Context, operation string, query *gorm.DB, page, pageSize int, columns, order string) ([]T, int64, error) {

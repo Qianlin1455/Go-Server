@@ -59,10 +59,15 @@ func (s *SourceService) resolveSnapshot(ctx context.Context, scope repository.So
 	if !validSourcePagination(input.Page, input.PageSize, maxPageSize) {
 		return 0, ErrInvalidPagination
 	}
+	return s.resolveVisibleSnapshot(ctx, scope, input.RevisionSHA, input.ImportJobID)
+}
+
+// resolveVisibleSnapshot expects a validated revision SHA.
+func (s *SourceService) resolveVisibleSnapshot(ctx context.Context, scope repository.SourceScope, revision string, externalJobID uint64) (uint64, error) {
 	if err := s.checkProject(ctx, scope); err != nil {
 		return 0, err
 	}
-	jobID, err := s.store.ResolveSnapshot(ctx, scope, strings.ToLower(input.RevisionSHA), input.ImportJobID)
+	jobID, err := s.store.ResolveSnapshot(ctx, scope, strings.ToLower(revision), externalJobID)
 	return jobID, sourceLookupError(err)
 }
 
