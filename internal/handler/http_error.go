@@ -31,6 +31,7 @@ func WriteServiceerror(c *gin.Context, err error) {
 		return
 
 	case errors.Is(err, service.ErrInvalidMessageInput),
+		errors.Is(err, service.ErrInvalidSourceInput),
 		errors.Is(err, service.ErrInvalidRegisterInput),
 		errors.Is(err, service.ErrInvalidPagination),
 		errors.Is(err, service.ErrInvalidProjectInput):
@@ -65,6 +66,14 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusNotFound
 		code = "NOT_FOUND"
 		message = "项目不存在"
+	case errors.Is(err, service.ErrSourceNotFound):
+		status = http.StatusNotFound
+		code = "NOT_FOUND"
+		message = "源码快照或文件不存在"
+	case errors.Is(err, service.ErrSourceFileTooLarge):
+		status = http.StatusRequestEntityTooLarge
+		code = "SOURCE_FILE_TOO_LARGE"
+		message = "源码文件超过响应大小限制"
 
 	case errors.Is(err, service.ErrInvalidTaskInput),
 		errors.Is(err, service.ErrTaskSourceMessageInvalid):

@@ -197,6 +197,7 @@ func main() {
 	)
 
 	importHandler := handler.NewImportHandler(importService)
+	sourceHandler := handler.NewSourceHandler(service.NewSourceService(db))
 
 	authService := service.NewAuthService(db, jwtManager)
 	authHandler := handler.NewAuthHandler(authService)
@@ -349,6 +350,7 @@ func main() {
 			"/projects/:id/imports",
 			importHandler.Create,
 		)
+		sourceHandler.RegisterRoutes(private)
 	}
 	// ========================================
 	// 7. 启动 HTTP Server
