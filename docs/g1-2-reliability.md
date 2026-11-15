@@ -37,4 +37,4 @@ $env:TEST_KAFKA_BROKER = '127.0.0.1:19094'
 go test -p 1 ./internal/consumer -run '^TestConsumer_RealKafkaDeadLetter$' -count=1 -v
 ```
 
-4. 手动观察生产 Worker 的退出时，可在专用环境中先启动 `WORKER_MODE=revision-check` 的 Worker，再创建两条导入任务。看到第一条被领取后向 Worker 发送 SIGTERM（Linux 用 `kill -TERM <pid>`，Windows 控制台用 Ctrl+C）。观察第一条的结果或租约状态，以及第二条的 `attempt_count`。另开一次实验，在看到 `running` 后用 Linux 的 `kill -KILL <pid>` 或 PowerShell 的 `Stop-Process -Id <pid> -Force`，待 `lease_expires_at` 过去，再启动另一 Worker 验证回收。
+4. 手动观察生产 Worker 的退出时，可在专用环境中先应用迁移 17，再启动 `WORKER_MODE=source-import` 的 Worker 并创建两条导入任务。看到第一条被领取后向 Worker 发送 SIGTERM（Linux 用 `kill -TERM <pid>`，Windows 控制台用 Ctrl+C）。观察第一条的结果或租约状态，以及第二条的 `attempt_count`。另开一次实验，在看到 `running` 后用 Linux 的 `kill -KILL <pid>` 或 PowerShell 的 `Stop-Process -Id <pid> -Force`，待 `lease_expires_at` 过去，再启动另一 Worker 验证回收。

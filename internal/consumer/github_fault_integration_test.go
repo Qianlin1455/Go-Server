@@ -2,8 +2,10 @@ package consumer
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -50,6 +52,8 @@ func TestHandler_GitHubHTTPFaults(t *testing.T) {
 			job := createConsumerTestJob(t, db)
 			store := repository.NewImportJobStore(db)
 			tree := strings.Repeat("a", 40)
+			content := "text\r\nx"
+			blob := fmt.Sprintf("%x", sha1.Sum([]byte("blob 7\x00"+content)))
 			reset := time.Now().UTC().Truncate(time.Second).Add(3 * time.Minute)
 			var requests, metadataCalls atomic.Int32
 			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +75,9 @@ func TestHandler_GitHubHTTPFaults(t *testing.T) {
 				case "/repos/golang/go/git/commits/" + job.RevisionSHA:
 					fmt.Fprintf(w, `{"sha":%q,"tree":{"sha":%q}}`, job.RevisionSHA, tree)
 				case "/repos/golang/go/git/trees/" + tree:
-					fmt.Fprintf(w, `{"sha":%q,"tree":[{"type":"blob","size":7}]}`, tree)
+					fmt.Fprintf(w, `{"sha":%q,"tree":[{"type":"blob","path":"readme.txt","mode":"100644","sha":%q,"size":7}]}`, tree, blob)
+				case "/repos/golang/go/git/blobs/" + blob:
+					fmt.Fprintf(w, `{"sha":%q,"size":7,"encoding":"base64","content":%q}`, blob, base64.StdEncoding.EncodeToString([]byte(content)))
 				default:
 					http.NotFound(w, r)
 				}
@@ -95,6 +101,10 @@ func TestHandler_GitHubHTTPFaults(t *testing.T) {
 				if len(session.marked) != 0 || session.commitCount != 0 || requests.Load() != 1 ||
 					got.LastErrorCode == nil || *got.LastErrorCode != tc.code {
 					t.Fatalf("unexpected queued state: job=%+v requests=%d", got, requests.Load())
+				}
+				var files int64
+				if err := db.Model(&model.SourceFile{}).Where("import_job_id = ?", job.ID).Count(&files).Error; err != nil || files != 0 {
+					t.Fatalf("failed download published source files: files=%d err=%v", files, err)
 				}
 				var earliest, latest time.Time
 				if tc.code == "GITHUB_TIMEOUT" {
@@ -150,8 +160,15 @@ func TestHandler_GitHubHTTPFaults(t *testing.T) {
 			}
 			if !observedRetry || got.Status != model.ImportJobSucceeded || got.AttemptCount != 2 ||
 				got.ResultTreeSHA == nil || *got.ResultTreeSHA != tree || len(session.marked) != 1 ||
-				session.commitCount != 1 || requests.Load() != 4 {
+				session.commitCount != 1 || requests.Load() != 5 {
 				t.Fatalf("unexpected terminal state: job=%+v, requests=%d, commits=%d", got, requests.Load(), session.commitCount)
+			}
+			var file model.SourceFile
+			if err := db.Where("import_job_id = ?", job.ID).Take(&file).Error; err != nil {
+				t.Fatal(err)
+			}
+			if file.Content != content || file.BlobSHA != blob || file.Path != "readme.txt" {
+				t.Fatal("consumer did not persist the verified blob")
 			}
 		})
 	}

@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	maxTreeResponseBytes int64 = 2 << 20
-	maxRevisionFiles           = 200
-	maxRevisionFileBytes int64 = 8 << 20
+	maxTreeResponseBytes  int64 = 2 << 20
+	maxRevisionFiles            = 200
+	maxRevisionTotalBytes int64 = 8 << 20
 )
 
 var ErrTreeBudgetExceeded = errors.New("github revision tree exceeds scan budget")
@@ -22,24 +22,37 @@ type RevisionSummary struct {
 	TotalBytes int64
 }
 
+type revisionTreeEntry struct {
+	Path string `json:"path"`
+	SHA  string `json:"sha"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	Size *int64 `json:"size"`
+}
+
 // 读取固定commit的文件树元数据，不下载文件、代码
 func (c *Client) InspectRevision(
 	ctx context.Context,
 	owner, repo, revisionSHA string,
 ) (RevisionSummary, error) {
+	result, _, err := c.loadRevisionTree(ctx, owner, repo, revisionSHA)
+	return result, err
+}
+
+func (c *Client) loadRevisionTree(ctx context.Context, owner, repo, revisionSHA string) (RevisionSummary, []revisionTreeEntry, error) {
 	var result RevisionSummary
 
 	//验证输入
 	if err := validateOwnerRepo(owner, repo); err != nil {
-		return result, err
+		return result, nil, err
 	}
 	if !shaPattern.MatchString(revisionSHA) {
-		return result, ErrInvalidInput
+		return result, nil, ErrInvalidInput
 	}
 
 	//验证仓库公开性
 	if _, err := c.getPublicMetadata(ctx, owner, repo); err != nil {
-		return result, err
+		return result, nil, err
 	}
 
 	base := "/repos/" + owner + "/" + repo
@@ -54,21 +67,18 @@ func (c *Client) InspectRevision(
 	}
 	err := c.doJSON(ctx, base+"/git/commits/"+revisionSHA, maxMetadata, &commit)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 
 	if !strings.EqualFold(commit.SHA, revisionSHA) ||
 		!shaPattern.MatchString(commit.Tree.SHA) {
-		return result, fmt.Errorf("%w:invalid commit/tree sha", ErrBadResponse)
+		return result, nil, fmt.Errorf("%w: invalid commit/tree sha", ErrBadResponse)
 	}
 	// 4. 获取递归 Git Tree
 	var tree struct {
-		SHA       string `json:"sha"`
-		Truncated bool   `json:"truncated"`
-		Entries   []struct {
-			Type string `json:"type"`
-			Size *int64 `json:"size"`
-		} `json:"tree"`
+		SHA       string              `json:"sha"`
+		Truncated bool                `json:"truncated"`
+		Entries   []revisionTreeEntry `json:"tree"`
 	}
 
 	treeSHA := strings.ToLower(commit.Tree.SHA)
@@ -79,15 +89,15 @@ func (c *Client) InspectRevision(
 		&tree,
 	)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 
 	//不接受截断结果
 	if tree.Truncated {
-		return result, ErrTreeBudgetExceeded
+		return result, nil, ErrTreeBudgetExceeded
 	}
-	if !strings.EqualFold(tree.SHA, treeSHA) {
-		return result, fmt.Errorf("%w:tree sha mismatch", ErrBadResponse)
+	if !strings.EqualFold(tree.SHA, treeSHA) || tree.Entries == nil {
+		return result, nil, fmt.Errorf("%w: invalid tree or tree SHA mismatch", ErrBadResponse)
 	}
 
 	result.CommitSHA = revisionSHA
@@ -95,22 +105,22 @@ func (c *Client) InspectRevision(
 
 	for _, entry := range tree.Entries {
 		switch entry.Type {
-		case "tree":
+		case "tree", "commit":
 			continue
 		case "blob":
 			if entry.Size == nil || *entry.Size < 0 {
-				return RevisionSummary{}, fmt.Errorf("%w:invalid blob size", ErrBadResponse)
+				return RevisionSummary{}, nil, fmt.Errorf("%w: invalid blob size", ErrBadResponse)
 			}
 			if result.FileCount >= maxRevisionFiles ||
-				*entry.Size > maxRevisionFileBytes-result.TotalBytes {
-				return RevisionSummary{}, ErrTreeBudgetExceeded
+				*entry.Size > maxRevisionTotalBytes-result.TotalBytes {
+				return RevisionSummary{}, nil, ErrTreeBudgetExceeded
 			}
 			result.FileCount++
 			result.TotalBytes += *entry.Size
 
 		default:
-			return RevisionSummary{}, fmt.Errorf("%w:unsupported tree entry %q", ErrBadResponse, entry.Type)
+			return RevisionSummary{}, nil, fmt.Errorf("%w: unsupported tree entry", ErrBadResponse)
 		}
 	}
-	return result, nil
+	return result, tree.Entries, nil
 }

@@ -469,27 +469,33 @@ func (r *ImportJobStore) CompleteJobWithResult(
 	if !importJobTreeSHAPattern.MatchString(result.TreeSHA) {
 		return false, ErrInvalidCompleteJobResult
 	}
+	if result.Source != nil {
+		return r.completeSourceSnapshot(ctx, jobID, leaseToken, result)
+	}
+	return r.completeJobWithResult(ctx, jobID, leaseToken, result)
+}
 
+func (r *ImportJobStore) completeJobWithResult(
+	ctx context.Context, jobID uint64, leaseToken []byte, result model.ImportJobResult,
+) (bool, error) {
 	//CAS更新：结果持久化与状态变更在同一条sql
 	dbResult := r.db.WithContext(ctx).Model(&model.ImportJob{}).
-		Where(
-			"id = ? AND status = ? AND lease_token = ? AND lease_expires_at>NOW(3)",
-			jobID, model.ImportJobRunning, leaseToken,
-		).Updates(map[string]any{
-		"result_tree_sha":    strings.ToLower(result.TreeSHA),
-		"result_file_count":  result.FileCount,
-		"result_total_bytes": result.TotalBytes,
+		Scopes(activeImportLease(jobID, leaseToken)).
+		Updates(map[string]any{
+			"result_tree_sha":    strings.ToLower(result.TreeSHA),
+			"result_file_count":  result.FileCount,
+			"result_total_bytes": result.TotalBytes,
 
-		"status":      model.ImportJobSucceeded,
-		"finished_at": gorm.Expr("NOW(3)"),
+			"status":      model.ImportJobSucceeded,
+			"finished_at": gorm.Expr("NOW(3)"),
 
-		"lease_owner":      nil,
-		"lease_token":      nil,
-		"lease_expires_at": nil,
+			"lease_owner":      nil,
+			"lease_token":      nil,
+			"lease_expires_at": nil,
 
-		"last_error_code":    nil,
-		"last_error_message": nil,
-	})
+			"last_error_code":    nil,
+			"last_error_message": nil,
+		})
 
 	if dbResult.Error != nil {
 		return false, fmt.Errorf(
@@ -498,6 +504,13 @@ func (r *ImportJobStore) CompleteJobWithResult(
 		)
 	}
 	return dbResult.RowsAffected == 1, nil
+}
+
+func activeImportLease(jobID uint64, token []byte) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		return db.Where("id = ? AND status = ? AND lease_token = ? AND lease_expires_at > NOW(3)",
+			jobID, model.ImportJobRunning, token)
+	}
 }
 
 func (r *ImportJobStore) FailJobPermanently(

@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -166,8 +168,8 @@ func createWorkerIntegrationJob(
 
 // 模拟 GitHub API。
 type integrationRevisionInspector struct {
-	summary githubclient.RevisionSummary
-	err     error
+	source githubclient.RevisionSource
+	err    error
 
 	owner    string
 	repo     string
@@ -175,12 +177,12 @@ type integrationRevisionInspector struct {
 	calls    int
 }
 
-func (f *integrationRevisionInspector) InspectRevision(
+func (f *integrationRevisionInspector) DownloadRevision(
 	ctx context.Context,
 	owner, repo, sha string,
-) (githubclient.RevisionSummary, error) {
+) (githubclient.RevisionSource, error) {
 	if err := ctx.Err(); err != nil {
-		return githubclient.RevisionSummary{}, err
+		return githubclient.RevisionSource{}, err
 	}
 
 	f.calls++
@@ -188,7 +190,7 @@ func (f *integrationRevisionInspector) InspectRevision(
 	f.repo = repo
 	f.revision = sha
 
-	return f.summary, f.err
+	return f.source, f.err
 }
 
 func TestRunner_RetrySchedule_MySQLIntegration(t *testing.T) {
@@ -284,12 +286,22 @@ func TestRunner_GitHubExecutor_MySQLIntegration(
 	treeSHA := strings.Repeat("A", 40)
 
 	inspector := &integrationRevisionInspector{
-		summary: githubclient.RevisionSummary{
-			CommitSHA:  revisionSHA,
-			TreeSHA:    treeSHA,
-			FileCount:  10,
-			TotalBytes: 1024,
+		source: githubclient.RevisionSource{
+			CommitSHA: revisionSHA,
+			TreeSHA:   treeSHA,
 		},
+	}
+	for i := range 10 {
+		content := strings.Repeat("a", 80)
+		if i == 0 {
+			content = strings.Repeat("\n", 300)
+		} else if i == 1 {
+			content = strings.Repeat("b", 1024-300-8*80)
+		}
+		blob := sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content)))
+		inspector.source.Files = append(inspector.source.Files, githubclient.RevisionFile{
+			Path: fmt.Sprintf("file%d.go", i), Language: "go", BlobSHA: fmt.Sprintf("%x", blob), Content: []byte(content),
+		})
 	}
 
 	// 1. 创建真实 MySQL Store。
@@ -404,6 +416,28 @@ func TestRunner_GitHubExecutor_MySQLIntegration(
 	if got.ResultTotalBytes == nil ||
 		*got.ResultTotalBytes != 1024 {
 		t.Fatal("total_bytes 持久化错误")
+	}
+	var files []model.SourceFile
+	if err := tx.Where("import_job_id = ?", job.ID).Order("path").Find(&files).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 10 {
+		t.Fatalf("stored files=%d", len(files))
+	}
+	first := files[0]
+	want := inspector.source.Files[0]
+	if first.Content != string(want.Content) || first.BlobSHA != want.BlobSHA ||
+		first.ContentSHA256 != fmt.Sprintf("%x", sha256.Sum256(want.Content)) || first.RevisionSHA != revisionSHA {
+		t.Fatal("source file bytes, hashes or revision differ")
+	}
+	var spans []model.SourceSpan
+	if err := tx.Where("source_file_id = ?", first.ID).Order("span_index").Find(&spans).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 2 || spans[0].LineStart != 1 || spans[0].LineEnd != 256 ||
+		spans[1].LineStart != 257 || spans[1].LineEnd != 300 ||
+		spans[0].Content+spans[1].Content != first.Content {
+		t.Fatal("source spans do not reconstruct the file with correct line numbers")
 	}
 
 	t.Log("PASS: import result persisted correctly")

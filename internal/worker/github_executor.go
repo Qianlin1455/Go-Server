@@ -12,21 +12,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// 依赖接口:方便测试时候用Fake Github Client
-type RevisionInspector interface {
-	InspectRevision(ctx context.Context,
-		owner, repo, sha string) (githubclient.RevisionSummary, error)
+type RevisionDownloader interface {
+	DownloadRevision(ctx context.Context, owner, repo, sha string) (githubclient.RevisionSource, error)
 }
 
 type GitHubExecutor struct {
 	db    *gorm.DB
 	repos *repository.GitHubRepositoryStore
-	gh    RevisionInspector
+	gh    RevisionDownloader
 }
 
 func NewGitHubExecutor(
 	db *gorm.DB,
-	gh RevisionInspector,
+	gh RevisionDownloader,
 ) *GitHubExecutor {
 	return &GitHubExecutor{
 		db:    db,
@@ -35,8 +33,8 @@ func NewGitHubExecutor(
 	}
 }
 
-// Execute执行V1固定Revision只读校验任务
-// 返回nil表示成功
+// Execute downloads the job's fixed revision. Runner commits the result with
+// the lease acquired by ClaimQueuedJob.
 func (e *GitHubExecutor) Execute(
 	ctx context.Context,
 	jobID uint64,
@@ -73,8 +71,7 @@ func (e *GitHubExecutor) Execute(
 			fmt.Errorf("load repository for job %d: %w", jobID, err)
 	}
 
-	// 3. 检查任务创建时固定的 Revision
-	summary, err := e.gh.InspectRevision(
+	source, err := e.gh.DownloadRevision(
 		ctx,
 		binding.Owner,
 		binding.Repo,
@@ -82,31 +79,31 @@ func (e *GitHubExecutor) Execute(
 	)
 	if err != nil {
 		return model.ImportJobResult{},
-			fmt.Errorf("inspect revision for job %d: %w", jobID, err)
+			fmt.Errorf("download revision for job %d: %w", jobID, err)
 	}
 
-	// 4. 校验数值，避免非法类型转换
-	if summary.FileCount < 0 ||
-		uint64(summary.FileCount) > uint64(^uint32(0)) ||
-		summary.TotalBytes < 0 {
-		return model.ImportJobResult{},
-			fmt.Errorf("invalid revision summary for job %d", jobID)
-	}
-
-	// 5. 转换为业务结果
 	result := model.ImportJobResult{
-		TreeSHA:    summary.TreeSHA,
-		FileCount:  uint32(summary.FileCount),
-		TotalBytes: uint64(summary.TotalBytes),
+		TreeSHA:   source.TreeSHA,
+		FileCount: uint32(len(source.Files)),
+		Source: &model.SourceSnapshot{
+			RevisionSHA: source.CommitSHA,
+			Files:       make([]model.SourceFile, 0, len(source.Files)),
+		},
+	}
+	for _, file := range source.Files {
+		result.TotalBytes += uint64(len(file.Content))
+		result.Source.Files = append(result.Source.Files, model.SourceFile{
+			Path: file.Path, BlobSHA: file.BlobSHA, Language: file.Language, Content: string(file.Content),
+		})
 	}
 
 	log.Printf(
-		"job=%d revision verified commit_sha=%s tree_sha=%s files=%d bytes=%d",
+		"job=%d revision downloaded commit_sha=%s tree_sha=%s files=%d bytes=%d",
 		jobID,
-		summary.CommitSHA,
-		summary.TreeSHA,
-		summary.FileCount,
-		summary.TotalBytes,
+		source.CommitSHA,
+		result.TreeSHA,
+		result.FileCount,
+		result.TotalBytes,
 	)
 
 	return result, nil

@@ -59,7 +59,7 @@ Go-Server/
 │   ├── response/        # 响应结构
 │   ├── security/        # JWT 相关实现
 │   └── service/         # 业务规则与事务边界
-├── migrations/          # 000001～000009 数据库迁移文件
+├── migrations/          # 000001～000017 数据库迁移文件
 ├── PRD.md               # 业务需求与设计记录（部分为规划内容）
 ├── go.mod
 └── README.md
@@ -119,7 +119,7 @@ migrate -path migrations -database "mysql://root:YOUR_PASSWORD@tcp(127.0.0.1:330
 migrate -path migrations -database "mysql://root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_db?multiStatements=true" version
 ```
 
-当前迁移范围为 **000001～000009**。`up` 仅运行尚未应用的版本；已有数据库**不要**在未核对表结构和版本记录前使用 `force`。
+当前迁移范围为 **000001～000017**。`up` 仅运行尚未应用的版本；已有数据库**不要**在未核对表结构和版本记录前使用 `force`。
 
 ### 5. 启动服务
 
@@ -132,6 +132,10 @@ go run ./cmd/server
 ```
 GET http://localhost:8080/healthz
 ```
+
+固定 Revision 源码导入要求先应用迁移 `000017`，再启动 Consumer 或独立 Worker。独立 Worker 使用 PowerShell 启动时设置 `$env:WORKER_MODE = 'source-import'`，然后运行 `go run ./cmd/worker`。
+
+源码快照按 ImportJob 保存。文件和片段与任务成功状态同事务提交，后续读取需要按任务归属授权并限定 `status = 'succeeded'`。导入结果统计通过筛选并持久化的文件。迁移前已完成的元数据任务不会自动补录源码。
 
 ## API 概览
 
@@ -216,6 +220,9 @@ go test -p 1 ./... -count=1
 | 000007        | 任务状态审计 `task_status_audits`                 |
 | 000008        | 任务证据 `task_evidence`                          |
 | 000009        | 任务评审记录 `task_reviews`（当前仅有数据表结构） |
+| 000010–000011 | 任务排序索引、GitHub 仓库绑定 |
+| 000012–000016 | ImportJob、任务生命周期、Outbox 和导入结果 |
+| 000017        | 固定 Revision 源码文件和行号片段 |
 
 ## 后续计划
 

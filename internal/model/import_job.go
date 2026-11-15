@@ -51,6 +51,7 @@ type ImportJobResult struct {
 	TreeSHA    string
 	FileCount  uint32
 	TotalBytes uint64
+	Source     *SourceSnapshot
 }
 
 func (ImportJob) TableName() string {

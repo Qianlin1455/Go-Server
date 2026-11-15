@@ -22,12 +22,8 @@ func main() {
 }
 
 func run() error {
-	// V1 仅允许在明确选择核验模式时启动
-	if os.Getenv("WORKER_MODE") != "revision-check" {
-		return fmt.Errorf(
-			"set WORKER_MODE=revision-check " +
-				"to enable metadata-only worker",
-		)
+	if os.Getenv("WORKER_MODE") != "source-import" {
+		return fmt.Errorf("set WORKER_MODE=source-import to enable fixed revision source import")
 	}
 
 	// 1. Worker 根 Context
