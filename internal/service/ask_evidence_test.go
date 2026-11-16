@@ -15,6 +15,18 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestBuildAskEvidenceRejectsBlankQuestions(t *testing.T) {
+	service := &SourceService{}
+	for _, question := range []string{"", " \t\r\n", "\u3000"} {
+		_, err := service.BuildAskEvidence(t.Context(), AskEvidenceInput{
+			UserID: 1, ProjectID: 1, RevisionSHA: testCommitSHA, Question: question,
+		})
+		if !errors.Is(err, ErrInvalidSourceInput) {
+			t.Errorf("question %q: got %v, want ErrInvalidSourceInput", question, err)
+		}
+	}
+}
+
 func TestAskKeywords(t *testing.T) {
 	for _, tc := range []struct {
 		name, question string

@@ -48,10 +48,18 @@ type Evidence struct {
 	Content       string `json:"content"`
 }
 
-func (s *SourceService) BuildAskEvidence(ctx context.Context, input AskEvidenceInput) (AskEvidenceResult, error) {
+func validateAskEvidenceInput(input AskEvidenceInput) error {
 	if input.UserID == 0 || input.ProjectID == 0 || !sourceRevisionPattern.MatchString(input.RevisionSHA) ||
-		len(input.Question) > askQuestionLimit || !utf8.ValidString(input.Question) || strings.ContainsRune(input.Question, 0) {
-		return AskEvidenceResult{}, ErrInvalidSourceInput
+		len(input.Question) > askQuestionLimit || !utf8.ValidString(input.Question) ||
+		strings.TrimSpace(input.Question) == "" || strings.ContainsRune(input.Question, 0) {
+		return ErrInvalidSourceInput
+	}
+	return nil
+}
+
+func (s *SourceService) BuildAskEvidence(ctx context.Context, input AskEvidenceInput) (AskEvidenceResult, error) {
+	if err := validateAskEvidenceInput(input); err != nil {
+		return AskEvidenceResult{}, err
 	}
 	keywords := askKeywords(input.Question)
 	scope := repository.SourceScope{UserID: input.UserID, ProjectID: input.ProjectID}
