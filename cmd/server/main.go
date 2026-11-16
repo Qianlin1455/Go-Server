@@ -37,61 +37,63 @@ func main() {
 		log.Fatalf("获取数据库连接池失败: %v", err)
 	}
 	defer sqlDB.Close()
-	// 1. 读取第一次快照
-	previous := sqlDB.Stats()
+	if os.Getenv("DEBUG_POOL") != "" {
+		// 1. 读取第一次快照
+		previous := sqlDB.Stats()
 
-	// 2. 创建退出信号
-	stopStats := make(chan struct{})
-	defer close(stopStats)
+		// 2. 创建退出信号
+		stopStats := make(chan struct{})
+		defer close(stopStats)
 
-	// 3. 启动监控 goroutine
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		// 3. 启动监控 goroutine
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				// 4. 读取当前快照
-				current := sqlDB.Stats()
+			for {
+				select {
+				case <-ticker.C:
+					// 4. 读取当前快照
+					current := sqlDB.Stats()
 
-				// 5. 计算增量
-				waitCountDelta :=
-					current.WaitCount - previous.WaitCount
+					// 5. 计算增量
+					waitCountDelta :=
+						current.WaitCount - previous.WaitCount
 
-				waitDurationDelta :=
-					current.WaitDuration - previous.WaitDuration
+					waitDurationDelta :=
+						current.WaitDuration - previous.WaitDuration
 
-				var avgWait time.Duration
+					var avgWait time.Duration
 
-				if waitCountDelta > 0 {
-					avgWait = waitDurationDelta /
-						time.Duration(waitCountDelta)
+					if waitCountDelta > 0 {
+						avgWait = waitDurationDelta /
+							time.Duration(waitCountDelta)
+					}
+
+					// 6. 打印统计结果
+					log.Printf(
+						"DB Pool: Open=%d InUse=%d Idle=%d "+
+							"WaitCount=%d Delta=%d "+
+							"WaitDuration=%s Delta=%s AvgWait=%s",
+						current.OpenConnections,
+						current.InUse,
+						current.Idle,
+						current.WaitCount,
+						waitCountDelta,
+						current.WaitDuration,
+						waitDurationDelta,
+						avgWait,
+					)
+
+					// 7. 更新上一轮快照
+					previous = current
+
+				case <-stopStats:
+					return
 				}
-
-				// 6. 打印统计结果
-				log.Printf(
-					"DB Pool: Open=%d InUse=%d Idle=%d "+
-						"WaitCount=%d Delta=%d "+
-						"WaitDuration=%s Delta=%s AvgWait=%s",
-					current.OpenConnections,
-					current.InUse,
-					current.Idle,
-					current.WaitCount,
-					waitCountDelta,
-					current.WaitDuration,
-					waitDurationDelta,
-					avgWait,
-				)
-
-				// 7. 更新上一轮快照
-				previous = current
-
-			case <-stopStats:
-				return
 			}
-		}
-	}()
+		}()
+	}
 
 	// ========================================
 	// 初始化共享 Redis Client
@@ -137,31 +139,6 @@ func main() {
 			log.Printf("Redis unavailable at startup: %v", err)
 		} else {
 			log.Printf("Redis connected at %s", redisAddr)
-		}
-	}
-
-	if cacheErr != nil {
-		log.Printf(
-			"Redis cache initialization failed: %v",
-			cacheErr,
-		)
-	} else {
-		defer func() {
-			if err := redisCache.Close(); err != nil {
-				log.Printf("close Redis client: %v", err)
-			}
-		}()
-
-		if err := redisCache.Ping(context.Background()); err != nil {
-			log.Printf(
-				"Redis unavailable at startup: %v",
-				err,
-			)
-		} else {
-			log.Printf(
-				"Redis cache connected at %s",
-				redisAddr,
-			)
 		}
 	}
 
