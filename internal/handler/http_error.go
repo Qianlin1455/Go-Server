@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"GoServer/internal/llmclient"
 	"GoServer/internal/response"
 	"GoServer/internal/service"
 	"context"
@@ -74,6 +75,33 @@ func WriteServiceerror(c *gin.Context, err error) {
 		status = http.StatusRequestEntityTooLarge
 		code = "SOURCE_FILE_TOO_LARGE"
 		message = "源码文件超过响应大小限制"
+
+	case errors.Is(err, llmclient.ErrDisabled):
+		status = http.StatusServiceUnavailable
+		code = "AI_DISABLED"
+		message = "AI 问答未启用"
+	case errors.Is(err, llmclient.ErrModelTimeout):
+		status = http.StatusGatewayTimeout
+		code = "MODEL_TIMEOUT"
+		message = "模型响应超时"
+	case errors.Is(err, llmclient.ErrModelUpstream):
+		status = http.StatusBadGateway
+		code = "MODEL_UPSTREAM_ERROR"
+		message = "模型服务暂时不可用"
+	case errors.Is(err, llmclient.ErrModelInvalidResponse),
+		errors.Is(err, llmclient.ErrModelResponseTooLarge),
+		errors.Is(err, service.ErrInvalidModelOutput):
+		status = http.StatusBadGateway
+		code = "MODEL_INVALID_RESPONSE"
+		message = "模型响应不符合问答协议"
+	case errors.Is(err, service.ErrInvalidEvidenceReference):
+		status = http.StatusBadGateway
+		code = "MODEL_INVALID_EVIDENCE"
+		message = "模型引用的证据无法验证"
+	case errors.Is(err, llmclient.ErrModelRequestTooLarge):
+		status = http.StatusRequestEntityTooLarge
+		code = "AI_CONTEXT_TOO_LARGE"
+		message = "问答上下文超过模型请求大小限制"
 
 	case errors.Is(err, service.ErrInvalidTaskInput),
 		errors.Is(err, service.ErrTaskSourceMessageInvalid):

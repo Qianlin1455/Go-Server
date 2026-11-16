@@ -12,6 +12,7 @@ import (
 	"GoServer/internal/githubclient"
 	"GoServer/internal/handler"
 	"GoServer/internal/idempotency"
+	"GoServer/internal/llmclient"
 	"GoServer/internal/midware"
 	"GoServer/internal/ratelimit"
 	"GoServer/internal/response"
@@ -197,7 +198,21 @@ func main() {
 	)
 
 	importHandler := handler.NewImportHandler(importService)
-	sourceHandler := handler.NewSourceHandler(service.NewSourceService(db))
+	sourceService := service.NewSourceService(db)
+	sourceHandler := handler.NewSourceHandler(sourceService)
+	modelConfig, err := llmclient.LoadConfig()
+	if err != nil {
+		log.Fatalf("initialize AI configuration: %v", err)
+	}
+	var completer llmclient.Completer
+	if modelConfig.Enabled() {
+		client, err := llmclient.NewClient(modelConfig)
+		if err != nil {
+			log.Fatalf("initialize AI client: %v", err)
+		}
+		completer = client
+	}
+	askHandler := handler.NewAskHandler(service.NewAskService(sourceService, completer))
 
 	authService := service.NewAuthService(db, jwtManager)
 	authHandler := handler.NewAuthHandler(authService)
@@ -351,6 +366,7 @@ func main() {
 			importHandler.Create,
 		)
 		sourceHandler.RegisterRoutes(private)
+		askHandler.RegisterRoutes(private)
 	}
 	// ========================================
 	// 7. 启动 HTTP Server
