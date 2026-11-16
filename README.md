@@ -1,263 +1,212 @@
 # Go-Server
 
-> 面向个人开发者的项目实践与任务证据管理后端：将项目讨论、实践任务、执行证据和状态追踪关联起来。
+Go-Server 是一个基于 Go 的异步源码导入与 AI 源码问答后端。它把 GitHub 公开仓库的固定 Revision 导入为可检索快照，让客户端能按文件和行号核验 AI 回答。项目、会话、消息、任务与实践证据构成另一条业务闭环，支持从讨论创建任务，再查看完成证据和状态审计。
 
-**项目状态：持续开发中** · **当前形式：Go 单体 HTTP API（分层架构）**
+v1.0 采用**单仓库、单体分层架构**。HTTP API、Publisher、Consumer 和独立 Worker 是共享领域代码与 MySQL Schema 的不同进程入口。仓库提供 HTTP API，使用 Apifox、curl 等客户端即可调用。
 
-Go-Server 的目标是帮助开发者把「围绕项目的讨论」转化为「可追踪、可验证的实践任务」。用户可以创建项目与会话、保存消息、基于来源消息建立任务，并提交测试输出、实验说明或 Git Commit SHA 作为完成证据。
+## 核心能力
 
-当前仓库聚焦于可靠的后端业务基础设施；仓库自动解析、AI 评审、异步任务调度等能力仍在规划或开发中，不应视为已上线功能。
+| 模块 | 当前能力 |
+| --- | --- |
+| 认证与资源归属 | 注册、登录、bcrypt 密码哈希、JWT 鉴权和当前用户查询。私有接口从认证上下文获取用户 ID。 |
+| 项目、会话与消息 | 创建项目、分页列表和详情。会话可在创建时关联项目，支持项目内会话列表、发送消息和历史分页。消息写入与会话更新时间在同一事务提交。 |
+| 实践任务与证据 | 创建任务、按状态筛选列表、CAS 更新状态。`todo → doing`、`doing → todo`、`doing → done` 合法，`done` 要求至少一条 `submitted` 证据，且为终态。成功的状态变更与审计记录一起提交。只读复盘返回任务、仍可访问的来源消息、证据和审计。 |
+| Redis | 项目详情按用户分键，校验缓存归属，使用 TTL 抖动、进程内 Singleflight 和 DB 回退。项目改名 Service 有缓存失效逻辑和并发测试，目前未注册改名 API。仓库绑定使用 Redis 用户级限流，10 次/分钟；Redis 限流不可用时接口返回 `503`。 |
+| GitHub 与导入入口 | 仅绑定公开仓库，读取默认分支的 Commit SHA；导入使用创建时的绑定记录固定 Revision。客户端支持可选 Token、仓库元数据缓存和限流识别。导入 API 使用 `Idempotency-Key`，MySQL 唯一键兜底，Redis 门禁加速并发请求。 |
+| 异步任务可靠性 | Import Job 和 Outbox 同事务写入。Publisher 用 Kafka 同步发送，Consumer 驱动 Runner，任务持久化到终态后确认。领取使用 CAS 和 Lease Token，支持租约过期恢复、带 Equal Jitter 的有界指数退避和 GitHub 重试时间、有限尝试、永久消息 DLQ。Consumer 和独立 Worker 支持信号取消，独立 Worker 支持限时排空。 |
+| 固定 Revision 快照与检索 | 导入支持的文本源码并存储 `source_files`、`source_spans`。文件内容、行号和 SHA-256 可核验；源码 API 仅从当前用户项目下成功导入的快照读取，支持列表、详情、片段分页和字面关键词搜索。 |
+| 基于证据的 AI 问答 | 从选定快照构建有限上下文，调用 OpenAI-compatible Chat Completions，严格解析结果并校验 Evidence ID，引用元数据由服务端组装。没有证据时直接返回，问答结构和资源归属校验独立于会话消息。 |
 
-## 核心功能
+## 架构和关键链路
 
-| 模块       | 已实现能力                                                   |
-| ---------- | ------------------------------------------------------------ |
-| 身份认证   | 用户注册、登录、JWT 鉴权，私有资源按用户隔离                 |
-| 项目管理   | 项目创建、详情及分页列表；区分 `active` / `archived` 状态    |
-| 会话与消息 | 会话可选关联项目；发送消息、查询会话与历史消息、项目内会话列表 |
-| 任务管理   | 在项目下创建与查询任务，可关联来源消息；支持状态机与版本校验 |
-| 实践证据   | 为任务创建草稿或正式证据，类型包括实验文本、测试输出、Commit SHA |
-| 状态审计   | 成功变更任务状态时，在同一数据库事务内记录审计信息           |
-
-### 任务状态与完成条件
-
-```
-todo ──> doing ──> done
-          │
-          └──────> todo
-```
-
-- 禁止非法或重复状态迁移；当前 `done` 不支持直接重新打开。
-- 从 `doing` 进入 `done` 前，任务必须至少有一条 `submitted` 证据。
-- 状态更新使用 `status`、`version` 等条件进行 CAS 更新，并检查影响行数；并发请求中只有满足预期版本与状态的更新可以成功。
-- 状态变更与审计写入位于同一个事务中，失败时整体回滚。
-- 已归档项目不允许创建任务、修改任务状态或提交证据；查询能力保留。
-
-## 技术栈
-
-- **语言与框架**：Go 1.27.1、Gin
-- **数据访问**：GORM、MySQL 8（InnoDB）
-- **认证**：JWT（HS256）
-- **数据库变更**：版本化 SQL Migration（`golang-migrate` CLI）
-- **测试**：Go `testing`、`httptest`、真实 MySQL 集成测试
-
-> Go 版本以仓库 `go.mod` 为准。当前代码以单体服务部署，尚未拆分成独立微服务。
-
-## 架构与目录
-
-```
-Go-Server/
-├── cmd/
-│   ├── server/          # HTTP 服务入口与路由注册
-│   └── poolbaseline/    # 数据库连接池基线实验
-├── internal/
-│   ├── database/        # MySQL 初始化与连接池配置
-│   ├── handler/         # HTTP 参数解析、响应与路由处理
-│   ├── midware/         # JWT、Request ID、Timeout 等中间件
-│   ├── model/           # 数据模型
-│   ├── repository/      # 数据持久化与条件更新
-│   ├── response/        # 响应结构
-│   ├── security/        # JWT 相关实现
-│   └── service/         # 业务规则与事务边界
-├── migrations/          # 000001～000017 数据库迁移文件
-├── PRD.md               # 业务需求与设计记录（部分为规划内容）
-├── go.mod
-└── README.md
+```mermaid
+flowchart LR
+    Client["HTTP 客户端"] --> API["Gin Handler 与 JWT"]
+    API --> Domain["业务 Service"]
+    Domain --> Repo["Repository"]
+    Repo --> DB[("MySQL")]
+    Domain --> Redis[("Redis 缓存 / 门禁 / 限流")]
+    Domain --> GH["GitHub 公开 REST API"]
+    Repo --> Tx["创建事务: Import Job + Outbox"]
+    Tx --> DB
+    DB --> Pub["Publisher 扫描 Outbox"]
+    Pub --> Kafka["Kafka: imports.requested"]
+    Kafka --> Con["Consumer Group"]
+    Con --> Runner["共享 Runner 逻辑: CAS 领取与租约"]
+    DB --> Standalone["独立 Worker: 轮询与恢复"]
+    Standalone --> Runner
+    Runner --> GH
+    Runner --> Snapshot["快照与终态事务"]
+    Snapshot --> DB
+    Con --> DLQ["Kafka: imports.dlq"]
 ```
 
-典型调用链：`HTTP Request → Gin Middleware → Handler → Service → Repository/GORM → MySQL`。
+数据库是任务和快照的事实来源。Kafka 发送和 Outbox 标记之间存在故障窗口，消息可能重投。Consumer 会重新读取任务状态，已成功或已失败的导入直接确认，过期 Lease Token 无法回写。DLQ 用于永久消息错误；GitHub 执行失败按任务状态机处理。
 
-分层边界上，Handler 负责协议和参数处理；Service 负责权限、状态机及事务；Repository 负责数据访问。数据库约束（外键、唯一键、CHECK）用于兜底保证数据一致性。
-
-Repository 统一分类数据库错误，并保留底层错误链，支持通过 `errors.Is` / `errors.As` 排查；事务开始和提交失败同样经过该边界。Handler 只返回固定的公开错误码和消息，内部数据库细节不会写入客户端响应。
-
-`Timeout` 默认设置 3 秒的请求 Context 截止时间，采用协作式取消。下游数据库操作必须传播该 Context；超时错误统一映射为 `504 DEADLINE_EXCEEDED`，中间件也会在处理链返回且响应尚未写出时补充 504。已经发送的响应（含已 Flush 的响应头）不会被覆盖或追加错误 JSON。忽略 Context 的处理代码无法被该中间件强制中断，因此它不保证每个请求都在 3 秒时返回。
-
-## 快速开始
-
-以下示例以 **Windows CMD + Docker MySQL（本机端口 3307）** 为例。请替换示例密码，**不要将真实密码、JWT 密钥或个人配置提交到仓库**。
-
-### 1. 环境准备
-
-- Go（版本参考 `go.mod`）
-- MySQL 8（可使用 Docker）
-- `golang-migrate` 命令行工具（带 MySQL 驱动）
-
-如尚未运行 MySQL，可创建一个本地测试容器：
-
-```
-docker run --name go-server-mysql -e MYSQL_ROOT_PASSWORD=YOUR_PASSWORD -e MYSQL_DATABASE=go_db -p 3307:3306 -d mysql:8.0
+```mermaid
+flowchart LR
+    Ask["Ask HTTP API"] --> Scope["鉴权、项目与 Revision 校验"]
+    Scope --> Retrieval["读取成功快照、字面检索"]
+    Retrieval --> Context["挑选片段并生成 Evidence ID"]
+    Context -->|有证据| LLM["LLM Client: Chat Completions"]
+    Context -->|证据不足| Empty["HTTP 200: INSUFFICIENT_EVIDENCE"]
+    LLM --> Parse["严格解析 answer 与 evidence_ids"]
+    Parse --> Ground["校验本次引用并组装路径、行号与哈希"]
+    Ground --> Response["HTTP 响应"]
 ```
 
-如已有 MySQL 容器，只需确保能连接 `127.0.0.1:3307` 且已创建 `go_db`，不必重复创建容器。
+Ask 最多选取 4 个片段，每段不超过 4 KiB，源码总量最多 16 KiB。用户问题和源码作为数据传入。模型只返回答案和引用 ID，服务端验证引用是否属于当次检索；这项校验约束引用来源，答案语义仍需结合源码核验。
 
-### 2. 获取代码
+## 技术栈与目录
 
+- Go **1.27.1**，以 `go.mod` 为准；Gin **1.12.0**、GORM **1.31.2** 与 MySQL Driver。
+- MySQL 8.0 与版本化 SQL Migration；Redis 7 Alpine 与 go-redis/v9；Kafka 4.4.0 Compose 镜像与 IBM Sarama。
+- golang-jwt/jwt/v5、bcrypt、`golang.org/x/sync/singleflight`；LLM 客户端基于标准库 `net/http` 和 JSON。
+- Go `testing`、`httptest`、Race Detector，另有真实 MySQL/Redis/Kafka 集成测试和 PowerShell E2E。
+
+```text
+cmd/
+  server/           Gin API 与组件组装
+  publisher/        MySQL Outbox → Kafka
+  consumer/         Kafka 消费、Runner 调用与 DLQ
+  worker/           可选的 MySQL 轮询导入 Worker
+  poolbaseline/     独立的 MySQL 连接池诊断程序
+internal/
+  handler/ service/ repository/ model/   HTTP、业务、持久化与模型
+  midware/ response/ security/          请求边界、响应与认证
+  database/ cache/ ratelimit/ idempotency/
+  githubclient/ llmclient/              GitHub 与模型 HTTP 客户端
+  worker/ publisher/ consumer/         异步执行和交付
+events/             ImportRequested 与 DLQ 消息定义
+migrations/         000001–000017，配套 up/down SQL
+scripts/e2e/        导入主链路与故障注入
+docs/               API、可靠性、实验与验证材料
 ```
-git clone https://github.com/Qianlin1455/Go-Server.git
-cd Go-Server
-go mod download
-```
 
-### 3. 配置数据库和 JWT
+## 本地运行
 
-在当前 **CMD** 会话中设置环境变量：
+### 1. MySQL、迁移与环境
 
-```
-set "MYSQL_DSN=root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_db?charset=utf8mb4&parseTime=True&loc=Local"
-set "JWT_SECRET=REPLACE_WITH_A_LONG_RANDOM_SECRET"
-```
+准备 Go 1.27.1、MySQL 8.0、Docker Compose 以及带 MySQL 驱动的 `migrate` CLI。从仓库根目录执行。Compose 提供 Redis 和 Kafka，MySQL 需另外启动。示例使用本地 MySQL 端口 `3307`，请按实际端口和授权账号替换占位符。
 
-`MYSQL_DSN` 供 GORM 使用；`JWT_SECRET` 用于签发与验证令牌。
-
-### 4. 执行数据库迁移
-
-请先确保已安装支持 MySQL 的 `migrate` CLI，并已创建 `go_db`：
-
-```
+```powershell
+mysql -h 127.0.0.1 -P 3307 -u root -p -e "CREATE DATABASE IF NOT EXISTS go_db CHARACTER SET utf8mb4"
 migrate -path migrations -database "mysql://root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_db?multiStatements=true" up
 migrate -path migrations -database "mysql://root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_db?multiStatements=true" version
+
+$env:MYSQL_DSN = 'root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_db?charset=utf8mb4&parseTime=True&loc=UTC'
+$env:JWT_SECRET = Read-Host 'JWT signing secret' -MaskInput
 ```
 
-当前迁移范围为 **000001～000017**。`up` 仅运行尚未应用的版本；已有数据库**不要**在未核对表结构和版本记录前使用 `force`。
+运行时从进程环境读取配置。每个独立终端都需要继承或设置相应变量。PowerShell 下也可运行 `./set-dsn.ps1` 交互设置业务和测试 DSN。
 
-### 5. 启动服务
+| 变量 | 用途与默认值 |
+| --- | --- |
+| `MYSQL_DSN`、`JWT_SECRET` | 数据库驱动 DSN；JWT 签发密钥由 HTTP 进程使用。 |
+| `REDIS_ADDR`、`REDIS_PASSWORD` | HTTP 使用的 Redis，默认 `127.0.0.1:6379`，密码按实例配置，仓库 Compose 默认无密码。 |
+| `KAFKA_BROKERS`、`KAFKA_GROUP_ID` | Publisher 与 Consumer 使用逗号分隔的 Broker，默认 `127.0.0.1:9092`。Consumer 默认组 `go-server-import-workers-v1`。 |
+| `PUBLISHER_BATCH_SIZE`、`PUBLISHER_INTERVAL` | 默认 `100` 条、`1s`。 |
+| `WORKER_MODE`、`WORKER_SHUTDOWN_GRACE` | 独立 Worker 必须设置 `source-import`，排空时间默认 `15s`。 |
+| `GITHUB_TOKEN` | 可选，HTTP 绑定和源码导入进程构造 GitHub 客户端时读取。 |
+| `AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY` | 三项均空时关闭 AI，部分配置或配置非法时 HTTP 进程启动失败。Base URL 示例为 `https://api.example.com/v1`，客户端追加 `/chat/completions`。本地 loopback 可使用 HTTP。 |
+| `DEBUG_POOL` | 非空时 HTTP 进程每 5 秒记录 MySQL 连接池统计。 |
 
+### 2. Redis、Kafka 和 Topic
+
+```powershell
+docker compose up -d --wait redis kafka
+docker compose ps
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic imports.requested --partitions 1 --replication-factor 1
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic imports.dlq --partitions 1 --replication-factor 1
 ```
+
+如果首次启动 Kafka 时日志出现 `AccessDeniedException` 指向 `/tmp/kraft-combined-logs`，可在本地开发 Compose 中按现有 E2E 脚本的方式修正该卷目录属主，再启动 Kafka。
+
+```powershell
+docker compose stop kafka
+docker compose run --rm --no-deps --user 0 --entrypoint chown kafka 1000:1000 /tmp/kraft-combined-logs
+docker compose up -d --wait kafka
+```
+
+### 3. 启动进程并调用
+
+按需在不同终端启动。启用 Ask 时，在 HTTP 进程启动前设置以下模型配置。使用 GitHub 认证额度时，在绑定和导入进程启动前设置 `GITHUB_TOKEN`。
+
+```powershell
+$env:AI_BASE_URL = 'https://api.example.com/v1'
+$env:AI_MODEL = 'YOUR_MODEL_ID'
+$env:AI_API_KEY = Read-Host 'Model API key' -MaskInput
+```
+
+```powershell
 go run ./cmd/server
+go run ./cmd/publisher
+go run ./cmd/consumer
 ```
 
-默认监听 `http://localhost:8080`，可访问：
+HTTP 监听 `:8080`，`GET /healthz` 可探测 HTTP 服务。Kafka 导入链路使用 Publisher 和 Consumer，Consumer 已包含 Runner。独立 Worker 可直接在 MySQL 轮询和恢复任务；演示 Kafka 链路时只启动上面的三个进程，便于观测领取路径。
 
-```
-GET http://localhost:8080/healthz
-```
-
-固定 Revision 源码导入要求先应用迁移 `000017`，再启动 Consumer 或独立 Worker。独立 Worker 使用 PowerShell 启动时设置 `$env:WORKER_MODE = 'source-import'`，然后运行 `go run ./cmd/worker`。
-
-源码快照按 ImportJob 保存。文件和片段与任务成功状态同事务提交，后续读取需要按任务归属授权并限定 `status = 'succeeded'`。导入结果统计通过筛选并持久化的文件。迁移前已完成的元数据任务不会自动补录源码。
-
-## 源码问答
-
-通过 JWT 访问 `POST /api/v1/projects/:id/ai/ask`，例如提交 `{"question":"为什么 SendMessage 使用事务？","revision_sha":"0123456789abcdef0123456789abcdef01234567"}`。会话 ID 可选且仅用于校验归属。问答从该项目的成功快照读取证据，返回可核对的路径、行号、Revision 和片段 SHA-256。证据不足时返回 `200 INSUFFICIENT_EVIDENCE`，模型调用次数为零。接口是只读的。
-
-通过服务进程环境设置 `AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY`。全部未设置时服务可正常启动，Ask 返回 `503 AI_DISABLED`。检索预算 2 秒，模型 HTTP 预算 8 秒，均受全局 12 秒请求期限约束。
-
-接口响应、错误码、引用规则、已知限制和 Apifox 步骤见 [Ask API](docs/ask-api.md)。默认测试使用本地模拟模型，可单独设置 `AI_LIVE_TEST=1` 并执行 `go test -p 1 ./internal/service -run '^TestAskLiveModelSmoke$' -count=1 -v` 验证真实端点。 [模型配置和冒烟条件](docs/llm-client.md)
-
-## API 概览
-
-基础路径：`/api/v1`。除健康检查和注册、登录外，其余接口均需要携带 `Authorization: Bearer <JWT>`。
-
-| Method | 路径                                 | 说明                            |
-| ------ | ------------------------------------ | ------------------------------- |
-| GET    | `/healthz`                           | 健康检查（不带 `/api/v1` 前缀） |
-| POST   | `/api/v1/auth/register`              | 注册                            |
-| POST   | `/api/v1/auth/login`                 | 登录                            |
-| GET    | `/api/v1/users/me`                   | 当前用户信息                    |
-| POST   | `/api/v1/projects`                   | 创建项目                        |
-| GET    | `/api/v1/projects`                   | 项目分页列表                    |
-| GET    | `/api/v1/projects/:id`               | 项目详情                        |
-| GET    | `/api/v1/projects/:id/conversations` | 项目内会话列表                  |
-| POST   | `/api/v1/conversations`              | 创建会话（可选 `project_id`）   |
-| GET    | `/api/v1/conversations/:id`          | 会话详情                        |
-| POST   | `/api/v1/conversations/:id/messages` | 发送消息                        |
-| GET    | `/api/v1/conversations/:id/messages` | 历史消息分页                    |
-| POST   | `/api/v1/projects/:id/tasks`         | 创建任务                        |
-| GET    | `/api/v1/projects/:id/tasks`         | 任务分页列表                    |
-| GET    | `/api/v1/tasks/:id/retrospective`    | 任务复盘：来源、证据、状态审计    |
-| PATCH  | `/api/v1/tasks/:id/status`           | 修改状态（需要 `version`）      |
-| POST   | `/api/v1/tasks/:id/evidence`         | 创建任务证据                    |
-
-### 示例：提交实验结果
-
-```
-POST /api/v1/tasks/1/evidence
-Authorization: Bearer <JWT>
-Content-Type: application/json
-
-{
-  "type": "test_output",
-  "text": "go test -p 1 ./... -count=1：全部相关测试通过",
-  "status": "submitted"
-}
+```powershell
+$env:WORKER_MODE = 'source-import'
+go run ./cmd/worker
 ```
 
-证据支持 `experiment_text`、`test_output` 和 `commit_sha` 三类；状态分为 `draft`、`submitted`。上述 Task ID 与 JWT 需替换为真实值。
+调用顺序为注册、登录、创建项目、绑定 `owner/repo`、创建导入。创建导入时提交 `{"repository_id":1}` 和 `Idempotency-Key`，保存返回的 `job_id` 与 `revision_sha`。用同一 JWT 查 `GET /api/v1/imports/:id`，成功后使用 `revision_sha` 和可选 `import_job_id` 检索或提问。Ask 示例和错误语义见 [Ask API](docs/ask-api.md)。
 
-### 示例：更新任务状态
+实践任务演示可先关联一条同项目会话消息，再提交正式证据，例如 `{"type":"test_output","status":"submitted","text":"TestTaskState: PASS"}`。任务处于 `doing` 时，以当前版本提交 `{"status":"done","version":2}`，完成后读取复盘核对来源、证据和审计。
 
-```
-PATCH /api/v1/tasks/1/status
-Authorization: Bearer <JWT>
-Content-Type: application/json
+## HTTP API
 
-{
-  "status": "doing",
-  "version": 1
-}
-```
+| 模块 | Method | 路径 | 功能 | JWT |
+| --- | --- | --- | --- | --- |
+| 探针 | GET | `/healthz` | HTTP 健康探针 | 否 |
+| 认证 | POST | `/api/v1/auth/register` | 注册 | 否 |
+| 认证 | POST | `/api/v1/auth/login` | 登录、获取 JWT | 否 |
+| 认证 | GET | `/api/v1/users/me` | 当前用户身份 | 是 |
+| 项目 | POST | `/api/v1/projects` | 创建项目 | 是 |
+| 项目 | GET | `/api/v1/projects` | 分页列出项目 | 是 |
+| 项目 | GET | `/api/v1/projects/:id` | 项目详情 | 是 |
+| 会话 | POST | `/api/v1/conversations` | 创建会话，可指定项目 | 是 |
+| 会话 | GET | `/api/v1/conversations/:id` | 会话详情 | 是 |
+| 会话 | GET | `/api/v1/projects/:id/conversations` | 项目内会话分页 | 是 |
+| 消息 | POST | `/api/v1/conversations/:id/messages` | 发送消息 | 是 |
+| 消息 | GET | `/api/v1/conversations/:id/messages` | 历史消息分页 | 是 |
+| 任务 | POST | `/api/v1/projects/:id/tasks` | 创建实践任务 | 是 |
+| 任务 | GET | `/api/v1/projects/:id/tasks` | 列表、状态筛选和分页 | 是 |
+| 任务 | PATCH | `/api/v1/tasks/:id/status` | 按版本变更状态 | 是 |
+| 任务证据 | POST | `/api/v1/tasks/:id/evidence` | 创建稿件或正式证据 | 是 |
+| 任务复盘 | GET | `/api/v1/tasks/:id/retrospective` | 读取任务、来源、证据和审计 | 是 |
+| 仓库 | POST | `/api/v1/projects/:id/repositories` | 绑定 GitHub 公开仓库 | 是 |
+| 导入 | POST | `/api/v1/projects/:id/imports` | 发起或重用幂等导入 | 是 |
+| 导入 | GET | `/api/v1/imports/:id` | 任务所有者查询导入状态 | 是 |
+| 源码 | GET | `/api/v1/projects/:id/source-files` | 快照文件列表 | 是 |
+| 源码 | GET | `/api/v1/projects/:id/source-files/:file_id` | 源文件详情与内容 | 是 |
+| 源码 | GET | `/api/v1/projects/:id/source-files/:file_id/spans` | 源文件片段分页 | 是 |
+| 源码 | GET | `/api/v1/projects/:id/source-search` | 字面关键词搜索 | 是 |
+| AI | POST | `/api/v1/projects/:id/ai/ask` | 对固定快照提问并获得可核验引用 | 是 |
 
-成功返回 HTTP `204 No Content`。任务最新版本需要从查询结果获取；使用过期版本可能收到冲突响应。
+## 测试、演示与边界
 
-## 测试与验证
+| 验证范围 | 仓库中的测试依据 |
+| --- | --- |
+| 单元与 HTTP | `internal/security/jwt_test.go`、`internal/service/task_state_test.go`、`internal/llmclient/client_test.go`，覆盖签发验签、状态转换和模型协议、超时、异常响应。 |
+| MySQL 与并发 | `internal/service/task_service_test.go`、`internal/service/import_job_concurrency_test.go`、`internal/repository/source_snapshot_test.go`，覆盖 CAS、并发幂等、结果回滚及过期租约。 |
+| Redis 与一致性 | `internal/cache/redis_test.go`、`internal/service/project_cache_race_test.go`、`internal/ratelimit/redis_test.go`，覆盖缓存、失效并发、限流隔离和 Lua 计数。 |
+| Kafka、故障和恢复 | `internal/publisher/publisher_test.go`、`internal/consumer/kafka_dlq_integration_test.go`、`internal/consumer/handler_integration_test.go`、`internal/worker/process_integration_test.go`，覆盖发送失败、真实 Broker DLQ、重复消费、落库与提交 Offset 的故障窗口及进程强杀后的租约恢复。 |
+| AI 端到端 | `internal/handler/ask_e2e_test.go` 使用 Gin、JWT、隔离 MySQL 和本地 HTTP 模型替身；`internal/service/ask_live_test.go` 提供显式启用的真实模型冒烟。 |
 
-部分集成测试使用真实 MySQL，并要求独立测试库 `go_server_test`。**不要将集成测试 DSN 指向开发库 `go_db`**。
+先为隔离的 `go_server_test` 创建数据库并应用同一套迁移。全仓测试中部分测试需要 `TEST_MYSQL_DSN`，另有用例直接读取 `MYSQL_DSN`，因此在**单独测试终端**中将两者指向测试库。使用隔离 Redis；不同测试读取 `TEST_REDIS_ADDR`/`TEST_REDIS_PASSWORD` 或 `REDIS_ADDR`。真实 Kafka DLQ 测试使用 `TEST_KAFKA_BROKER`，只在空的独立 Broker 上运行。未配置外部依赖的测试有的会跳过，有的会报错。
 
-```
-set "TEST_MYSQL_DSN=root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_server_test?charset=utf8mb4&parseTime=True&loc=Local"
+```powershell
+$env:TEST_MYSQL_DSN = 'root:YOUR_PASSWORD@tcp(127.0.0.1:3307)/go_server_test?charset=utf8mb4&parseTime=True&loc=UTC'
+$env:MYSQL_DSN = $env:TEST_MYSQL_DSN
+$env:TEST_REDIS_ADDR = '127.0.0.1:6379'  # 确认该端口是隔离测试实例
+$env:REDIS_ADDR = $env:TEST_REDIS_ADDR
+go build ./...
 go test -p 1 ./... -count=1
+go test -race -p 1 ./internal/service ./internal/handler ./internal/llmclient ./internal/worker ./internal/consumer -count=1
 ```
 
-运行前请创建测试库并将相应迁移应用到测试库；同时保留运行时所需的 `MYSQL_DSN` 和 `JWT_SECRET`。部分测试在未设置测试 DSN 时会跳过，检查测试输出中的 `SKIP` 才能确认覆盖是否完整。
+在 PowerShell 7 的隔离环境可依次运行 `./scripts/e2e/01-up.ps1`、`./scripts/e2e/02-happy.ps1` 和 `./scripts/e2e/99-down.ps1`。脚本使用 Compose 服务名及宿主端口，启动前应预留这些资源。故障脚本覆盖强杀 Consumer 内的 Worker、Kafka 停机补发、并发幂等和成功事件重投。真实模型冒烟需额外配置 AI 三项并显式设置 `AI_LIVE_TEST=1`。详见 [实验记录](docs/experiments/kafka-outbox.md)、[可靠性验证](docs/g1-2-reliability.md)和 [LLM Client](docs/llm-client.md)。
 
-已有测试重点覆盖：
-
-- JWT 认证、跨用户资源隔离与非法参数；
-- 项目、会话、消息、任务的 CRUD 相关接口及分页边界；
-- 任务状态转换、旧版本更新冲突、并发 CAS；
-- 状态变更与审计的事务原子性、故障注入回滚；
-- 证据格式校验、归档项目禁止写入、跨用户拒绝与持久化回滚。
-
-## 数据库演进
-
-| 版本          | 主要变化                                          |
-| ------------- | ------------------------------------------------- |
-| 000001–000003 | 用户、会话、消息                                  |
-| 000004–000006 | 项目、会话关联项目、任务                          |
-| 000007        | 任务状态审计 `task_status_audits`                 |
-| 000008        | 任务证据 `task_evidence`                          |
-| 000009        | 任务评审记录 `task_reviews`（当前仅有数据表结构） |
-| 000010–000011 | 任务排序索引、GitHub 仓库绑定 |
-| 000012–000016 | ImportJob、任务生命周期、Outbox 和导入结果 |
-| 000017        | 固定 Revision 源码文件和行号片段 |
-
-## 后续计划
-
-以下均为**计划中**的能力，非当前已实现功能：
-
-- 基于 `task_reviews` 实现评审 Service、HTTP API 与业务测试；
-- Redis 幂等键与并发控制；
-- Kafka Outbox / Worker、重试与异常任务恢复；
-- gRPC 调用治理：超时预算、重试与幂等；
-- 进一步完善可观测性、指标与性能基线。
-
-## 设计文档
-
-更多背景和业务约束参见 [`PRD.md`](./PRD.md)。其中包含阶段性设计和未完成需求，实际接口能力以本 README 的「API 概览」和当前路由代码为准。
-
-## 说明
-
-本项目目前以个人开发和工程实践为主，持续完善真实业务约束、事务一致性、并发正确性与测试覆盖。
-
-
-## v6.1 P0 业务闭环验收
-
-任务列表支持可选 `status=todo|doing|done`，返回 `items/page/page_size/total`。
-默认 page=1、page_size=20，范围为 page>=1、1<=page_size<=100，非法参数返回 400，保留 OFFSET 溢出保护。
-Count 与 List 共用用户、项目和状态条件，按 `created_at DESC, id DESC` 稳定排序；两条 SQL 在并发写入下不保证同一快照。
-
-`GET /api/v1/tasks/:id/retrospective` 需要 JWT，返回任务、来源消息、证据和状态审计；其他用户或不存在的任务均返回 404。
-该接口提供 PRD 所需的事实复盘，不产生 task_reviews 评审决策。
-
-实际测试、事务故障注入、HTTP 运行记录以及一键复现脚本见 [业务闭环证据](docs/evidence/business-flow/README.md)。
+v1.0 提供单轮源码问答和任务证据复盘。项目改名 HTTP 接口、归档恢复、独立评审、自动 DLQ 重放、多轮/Agent/工具调用、前端与生产级多机高可用属于后续边界。业务约束和逐项交付状态见 [PRD](PRD.md)，GitHub 配额与客户端行为见 [GitHub API Client](docs/github-api-client.md)。
