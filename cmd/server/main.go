@@ -342,6 +342,7 @@ func main() {
 			"/projects/:id/imports",
 			importHandler.Create,
 		)
+		private.GET("/imports/:id", handler.GetImportJob(importService))
 		sourceHandler.RegisterRoutes(private)
 		askHandler.RegisterRoutes(private)
 	}

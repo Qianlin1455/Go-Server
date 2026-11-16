@@ -147,6 +147,7 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 		midware.JWTAuth(jwtManager),
 		h.Create,
 	)
+	router.GET("/api/v1/imports/:id", midware.JWTAuth(jwtManager), GetImportJob(svc))
 
 	path := fmt.Sprintf(
 		"/api/v1/projects/%d/imports",
@@ -456,4 +457,52 @@ func TestImportHandler_HTTPIdempotency(t *testing.T) {
 	}
 
 	t.Log("PASS: database contains exactly 1 import job")
+
+	getJob := func(token string, jobID uint64) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/imports/%d", jobID), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("other user sees not found", func(t *testing.T) {
+		foreign := getJob(tokenB, firstID)
+		if foreign.Code != http.StatusNotFound {
+			t.Fatalf("GET foreign job: want 404, got %d: %s", foreign.Code, foreign.Body.String())
+		}
+		if got, want := foreign.Body.String(), `{"code":"IMPORT_JOB_NOT_FOUND","message":"Not Found"}`; got != want {
+			t.Fatalf("unexpected 404 body: %s", got)
+		}
+	})
+
+	t.Run("owner sees job", func(t *testing.T) {
+		owned := getJob(tokenA, firstID)
+		if owned.Code != http.StatusOK {
+			t.Fatalf("GET owned job: want 200, got %d: %s", owned.Code, owned.Body.String())
+		}
+		var result struct {
+			Code string `json:"code"`
+			Data struct {
+				ID           uint64    `json:"id"`
+				ProjectID    uint64    `json:"project_id"`
+				RepositoryID uint64    `json:"repository_id"`
+				Status       string    `json:"status"`
+				Attempts     *uint16   `json:"attempts"`
+				RevisionSHA  string    `json:"revision_sha"`
+				CreatedAt    time.Time `json:"created_at"`
+				UpdatedAt    time.Time `json:"updated_at"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(owned.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		job := result.Data
+		if result.Code != "SUCCESS" || job.ID != firstID || job.ProjectID != project.ID ||
+			job.RepositoryID != repo.ID || job.Status != model.ImportJobQueued ||
+			job.Attempts == nil || *job.Attempts != 0 || job.RevisionSHA != revisionSHA ||
+			job.CreatedAt.IsZero() || job.UpdatedAt.IsZero() {
+			t.Fatalf("unexpected job response: %s", owned.Body.String())
+		}
+	})
 }

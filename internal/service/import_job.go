@@ -27,6 +27,7 @@ var (
 	ErrImportInvalidInput        = errors.New("invalid import input")
 	ErrImportProjectNotFound     = errors.New("import project not found")
 	ErrImportRepositoryNotFound  = errors.New("import repository not found")
+	ErrImportJobNotFound         = errors.New("import job not found")
 	ErrImportIdempotencyConflict = errors.New("idempotency key conflict")
 	ErrImportProjectArchived     = errors.New("import project archived")
 )
@@ -73,6 +74,24 @@ func NewImportJobServiceWithGate(
 	svc := NewImportJobService(db)
 	svc.gate = gate
 	return svc
+}
+
+func (s *ImportJobService) GetImportJob(ctx context.Context, userID, jobID uint64) (*model.ImportJob, error) {
+	if userID == 0 || jobID == 0 {
+		return nil, ErrImportInvalidInput
+	}
+
+	job, err := s.jobs.GetByID(ctx, jobID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrImportJobNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if job.UserID != userID {
+		return nil, ErrImportJobNotFound
+	}
+	return job, nil
 }
 
 // 请求指纹只包含本次导入请求的稳定业务参数，不使用可能随时间变化的repo.last sha

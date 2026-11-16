@@ -136,6 +136,44 @@ func (h *ImportHandler) Create(c *gin.Context) {
 	})
 }
 
+func GetImportJob(svc *service.ImportJobService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, ok := midware.UserIDFromContext(c.Request.Context())
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code": "UNAUTHORIZED", "message": "authentication required",
+			})
+			return
+		}
+		jobID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+		if err != nil || jobID == 0 {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"code": "INVALID_IMPORT_JOB_ID", "message": "invalid import job ID",
+			})
+			return
+		}
+
+		job, err := svc.GetImportJob(c.Request.Context(), userID, jobID)
+		if err != nil {
+			writeImportError(c, err)
+			return
+		}
+
+		data := gin.H{
+			"id": job.ID, "project_id": job.ProjectID, "repository_id": job.RepositoryID,
+			"status": job.Status, "attempts": job.AttemptCount, "revision_sha": job.RevisionSHA,
+			"created_at": job.CreatedAt, "updated_at": job.UpdatedAt,
+		}
+		if job.LastErrorCode != nil {
+			data["last_error_code"] = *job.LastErrorCode
+		}
+		if job.LastErrorMessage != nil {
+			data["last_error_message"] = *job.LastErrorMessage
+		}
+		c.JSON(http.StatusOK, gin.H{"code": "SUCCESS", "data": data})
+	}
+}
+
 func writeImportError(c *gin.Context, err error) {
 	status := http.StatusInternalServerError
 	code := "INTERNAL_ERROR"
@@ -160,6 +198,10 @@ func writeImportError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrImportRepositoryNotFound):
 		status = http.StatusNotFound
 		code = "REPOSITORY_NOT_FOUND"
+
+	case errors.Is(err, service.ErrImportJobNotFound):
+		status = http.StatusNotFound
+		code = "IMPORT_JOB_NOT_FOUND"
 
 	case errors.Is(err, service.ErrImportProjectArchived):
 		status = http.StatusConflict
