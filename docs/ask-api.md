@@ -1,4 +1,4 @@
-# G-2.3-E 源码问答 API
+# G-2.3 源码问答 API
 
 `POST /api/v1/projects/:id/ai/ask` 使用 `Authorization: Bearer {{token}}` 和 `Content-Type: application/json`。
 
@@ -35,6 +35,10 @@
 
 证据不足时响应为 HTTP 200，`code` 为 `INSUFFICIENT_EVIDENCE`，`data` 仍包含服务端说明、Revision、快照 ID 和 `citations: []`。这条路径直接结束于检索阶段。
 
+检索只读取所选成功快照，发送给模型的完整片段最多 4 条，每条最多 4 KiB，源码合计最多 16 KiB。每次请求重新生成 Evidence ID。模型只需返回解释和引用 ID，路径、Revision、行号和哈希由服务端从该请求的可信片段组装。任一引用无法验证时整份回答失败。
+
+所有阶段受 Gin 的 12 秒请求期限约束。项目与会话校验、快照选择和源码检索共享 2 秒预算。模型 HTTP 调用最多 8 秒，父 Context 较早到期时优先，取消会传递到数据库和模型请求。模型调用最多一次。
+
 | HTTP | code | 场景 |
 |---|---|---|
 | 400 | `INVALID_ARGUMENT` | 请求或字段校验失败 |
@@ -50,6 +54,8 @@
 | 504 | `DEADLINE_EXCEEDED` / `MODEL_TIMEOUT` | 请求或数据库阶段到期，或模型客户端超时 |
 
 服务器启动时按 [LLM Client 配置](llm-client.md) 加载环境变量。三项配置齐全时创建一个共用客户端。三项都为空时 Ask 返回 `AI_DISABLED`，部分配置会使启动失败。
+
+源码和用户问题以 JSON 数据字段传给模型，系统提示保持固定。自动化验收覆盖字段隔离、工具调用拦截和引用白名单。当前使用字面检索，部分自然语言问题可能无法命中。有效引用只能证明来源和元数据可追溯，模型正文仍可能误解证据。真实模型行为通过 [可选冒烟测试](llm-client.md#可选真实端点冒烟测试) 和人工验收评估。
 
 ## Apifox 验收
 

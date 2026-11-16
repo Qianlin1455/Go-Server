@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -72,9 +72,9 @@ type completionResponse struct {
 	Choices []struct {
 		FinishReason string `json:"finish_reason"`
 		Message      struct {
-			Content      string          `json:"content"`
-			ToolCalls    json.RawMessage `json:"tool_calls"`
-			FunctionCall json.RawMessage `json:"function_call"`
+			Content      string            `json:"content"`
+			ToolCalls    []json.RawMessage `json:"tool_calls"`
+			FunctionCall json.RawMessage   `json:"function_call"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -142,11 +142,14 @@ func (c *Client) Complete(ctx context.Context, input Request) (Response, error) 
 
 func parseCompletion(payload []byte) (Response, error) {
 	var result completionResponse
-	if !utf8.Valid(payload) || json.Unmarshal(payload, &result) != nil || len(result.Choices) == 0 {
+	// Strict JSON decoding rejects duplicate keys that could hide a tool call.
+	if jsonv2.Unmarshal(payload, &result) != nil || len(result.Choices) == 0 {
 		return Response{}, ErrModelInvalidResponse
 	}
 	for _, choice := range result.Choices {
-		if choice.Message.ToolCalls != nil || choice.Message.FunctionCall != nil {
+		functionCall := choice.Message.FunctionCall
+		if len(choice.Message.ToolCalls) != 0 ||
+			(len(functionCall) != 0 && !bytes.Equal(bytes.TrimSpace(functionCall), []byte("null"))) {
 			return Response{}, ErrModelInvalidResponse
 		}
 	}

@@ -137,6 +137,14 @@ GET http://localhost:8080/healthz
 
 源码快照按 ImportJob 保存。文件和片段与任务成功状态同事务提交，后续读取需要按任务归属授权并限定 `status = 'succeeded'`。导入结果统计通过筛选并持久化的文件。迁移前已完成的元数据任务不会自动补录源码。
 
+## 源码问答
+
+通过 JWT 访问 `POST /api/v1/projects/:id/ai/ask`，例如提交 `{"question":"为什么 SendMessage 使用事务？","revision_sha":"0123456789abcdef0123456789abcdef01234567"}`。会话 ID 可选且仅用于校验归属。问答从该项目的成功快照读取证据，返回可核对的路径、行号、Revision 和片段 SHA-256。证据不足时返回 `200 INSUFFICIENT_EVIDENCE`，模型调用次数为零。接口是只读的。
+
+通过服务进程环境设置 `AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY`。全部未设置时服务可正常启动，Ask 返回 `503 AI_DISABLED`。检索预算 2 秒，模型 HTTP 预算 8 秒，均受全局 12 秒请求期限约束。
+
+接口响应、错误码、引用规则、已知限制和 Apifox 步骤见 [Ask API](docs/ask-api.md)。默认测试使用本地模拟模型，可单独设置 `AI_LIVE_TEST=1` 并执行 `go test -p 1 ./internal/service -run '^TestAskLiveModelSmoke$' -count=1 -v` 验证真实端点。 [模型配置和冒烟条件](docs/llm-client.md)
+
 ## API 概览
 
 基础路径：`/api/v1`。除健康检查和注册、登录外，其余接口均需要携带 `Authorization: Bearer <JWT>`。

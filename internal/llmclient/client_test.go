@@ -176,7 +176,11 @@ func TestCompleteRejectsInvalidResponses(t *testing.T) {
 		{"missing finish reason", `{"choices":[{"message":{"content":"text"}}]}`, ErrModelInvalidResponse},
 		{"length", `{"choices":[{"message":{"content":"text"},"finish_reason":"length"}]}`, ErrModelInvalidResponse},
 		{"tool calls", `{"choices":[{"message":{"content":"text","tool_calls":[{"id":"call-1"}]},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
-		{"null tool calls", `{"choices":[{"message":{"content":"text","tool_calls":null},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
+		{"malformed tool calls object", `{"choices":[{"message":{"content":"text","tool_calls":{}},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
+		{"malformed tool calls string", `{"choices":[{"message":{"content":"text","tool_calls":"[]"},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
+		{"duplicate tool calls", `{"choices":[{"message":{"content":"text","tool_calls":[{}],"tool_calls":[]},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
+		{"duplicate function call", `{"choices":[{"message":{"content":"text","function_call":{},"function_call":null},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
+		{"malformed function call", `{"choices":[{"message":{"content":"text","function_call":[]},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
 		{"function calls", `{"choices":[{"message":{"content":"text","function_call":{"name":"test"}},"finish_reason":"stop"}]}`, ErrModelInvalidResponse},
 		{"large body", normalCompletion + strings.Repeat(" ", maxResponseBytes), ErrModelResponseTooLarge},
 	} {
@@ -188,6 +192,27 @@ func TestCompleteRejectsInvalidResponses(t *testing.T) {
 			got, err := testClient(t, upstream).Complete(t.Context(), Request{})
 			if got.Content != "" || !errors.Is(err, tc.want) {
 				t.Fatalf("got content length %d, err=%v, want %v", len(got.Content), err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompleteAcceptsEmptyToolMetadata(t *testing.T) {
+	for _, fields := range []string{
+		"",
+		`,"tool_calls":null`,
+		`,"tool_calls":[]`,
+		`,"function_call": null`,
+		`,"tool_calls": [],"function_call":null`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"choices":[{"message":{"content":"text"%s},"finish_reason":"stop"}]}`, fields)
+			}))
+			defer upstream.Close()
+			got, err := testClient(t, upstream).Complete(t.Context(), Request{})
+			if err != nil || got.Content != "text" {
+				t.Fatalf("unused tool metadata rejected: %v", err)
 			}
 		})
 	}
